@@ -16,7 +16,9 @@ def main():
             "date": None,
             "time": None,
             "purpose": None
-        }
+        },
+        "last_action": None,
+        "action_count": 0
     }
     
     while True:
@@ -47,15 +49,6 @@ def main():
                 final_answer = last_message.split("Final Answer:")[-1].strip()
                 print(f"\nAgent: {final_answer}\n")
                 
-                # Update booking info if provided in the response
-                if "name:" in final_answer.lower():
-                    state["booking_info"]["name"] = final_answer.split("name:")[-1].split(",")[0].strip()
-                if "date:" in final_answer.lower():
-                    state["booking_info"]["date"] = final_answer.split("date:")[-1].split(",")[0].strip()
-                if "time:" in final_answer.lower():
-                    state["booking_info"]["time"] = final_answer.split("time:")[-1].split(",")[0].strip()
-                if "purpose:" in final_answer.lower():
-                    state["booking_info"]["purpose"] = final_answer.split("purpose:")[-1].split(".")[0].strip()
             elif "Action:" in last_message and "Observation:" in last_message:
                 # This is a tool response, don't display it directly
                 continue

@@ -24,6 +24,8 @@ class AgentState(TypedDict):
     next: str
     current_step: str
     booking_info: Dict[str, Any]
+    last_action: str
+    action_count: int
 
 class CustomPromptTemplate(StringPromptTemplate):
     template: str
@@ -60,13 +62,12 @@ class AppointmentAgent:
             "time": None,
             "purpose": None
         }
-        self.last_action = None
-        self.action_count = 0
         
     def create_agent(self):
         # Get the tools
         tools = [Tool(**tool) for tool in self.tools_handler.get_tools()]
         logger.info(f"Available tools: {[tool.name for tool in tools]}")
+        tool_map = {tool.name: tool for tool in tools}
         
         # Set up the prompt template
         template = """
@@ -96,15 +97,15 @@ class AppointmentAgent:
         Final Answer: the final answer to the original input question
         
         For booking appointments, use this JSON format:
-        {{"name": "person name", "date": "dd/mm/yyyy", "time": "number with am/pm", "purpose": "appointment purpose"}}
+        {{"name": "person name", "date": "YYYY-MM-DD", "time": "HH:MM", "purpose": "appointment purpose"}}
         
         Important Instructions:
         1. Be friendly and conversational in your responses.
         2. If the user's input is unclear or too short (like "hi", "hello", etc.), use the HandleGreeting tool ONCE.
         3. When booking appointments:
            - First, ask for the person's name if not already provided
-           - Then, ask for their preferred date (in dd/mm/yyyy format) if not already provided
-           - Next, ask for their preferred time (in number with am/pm format) if not already provided
+           - Then, ask for their preferred date (in YYYY-MM-DD format) if not already provided
+           - Next, ask for their preferred time (in HH:MM 24-hour format, e.g., 14:30) if not already provided
            - Finally, ask for the purpose of the appointment if not already provided
            - Only use the BookAppointment tool when you have all the required information
         4. If the user wants to view appointments:
@@ -127,14 +128,15 @@ class AppointmentAgent:
         18. If you've used HandleGreeting twice in a row, provide a Final Answer instead.
         19. If you've used any tool 3 times in a row, provide a Final Answer to break the loop.
         20. When asking for information, be specific about the format required:
-            - For dates: "Please provide the date in dd/mm/yyyy format (e.g., 11/09/2025)"
-            - For time: "Please provide the time in number with am/pm format (e.g., 11am or 2:30pm)"
+            - For dates: "Please provide the date in YYYY-MM-DD format (e.g., 2025-09-11)"
+            - For time: "Please provide the time in HH:MM 24-hour format (e.g., 09:00 or 14:30)"
             - For purpose: "Please provide the purpose of your appointment"
         21. If the user provides information in the wrong format, politely ask them to provide it in the correct format.
         22. If the user asks for examples of valid purposes, use the GetPurposeExamples tool.
         23. When you have all required information (has_all_info is true), use the BookAppointment tool to book the appointment.
         24. After successfully booking an appointment, confirm the details with the user and ask if they need anything else.
         25. If the user provides information that's already in the booking_info, acknowledge it and ask for the next missing piece of information.
+        26. When providing a Final Answer related to booking, summarize all currently known booking details (Name, Date, Time, Purpose) if available.
         
         Begin!
         
@@ -169,13 +171,13 @@ class AppointmentAgent:
             if not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 2:
                 state["booking_info"]["name"] = last_message
             
-            # Check for date (dd/mm/yyyy format)
-            date_match = re.search(r'\d{2}/\d{2}/\d{4}', last_message)
+            # Check for date (YYYY-MM-DD format)
+            date_match = re.search(r'\d{4}-\d{2}-\d{2}', last_message)
             if date_match:
                 state["booking_info"]["date"] = date_match.group(0)
             
-            # Check for time (number with am/pm format)
-            time_match = re.search(r'\d{1,2}(?::\d{2})?\s*(?:am|pm)', last_message.lower())
+            # Check for time (HH:MM format)
+            time_match = re.search(r'\d{2}:\d{2}', last_message.lower())
             if time_match:
                 state["booking_info"]["time"] = time_match.group(0)
             
@@ -194,8 +196,8 @@ class AppointmentAgent:
                 date=state["booking_info"]["date"],
                 time=state["booking_info"]["time"],
                 purpose=state["booking_info"]["purpose"],
-                last_action=self.last_action,
-                action_count=self.action_count,
+                last_action=state["last_action"],
+                action_count=state["action_count"],
                 has_all_info=has_all_info
             ))
             logger.info(f"Agent response: {response.content}")
@@ -216,78 +218,118 @@ class AppointmentAgent:
                 logger.info(f"Tool action: {action}")
                 
                 # Update action tracking
-                if action == self.last_action:
-                    self.action_count += 1
+                if action == state["last_action"]:
+                    state["action_count"] += 1
                 else:
-                    self.last_action = action
-                    self.action_count = 1
+                    state["last_action"] = action
+                    state["action_count"] = 1
                 
                 # Force final answer if too many consecutive actions
-                if self.action_count >= 3:
+                if state["action_count"] >= 3:
                     logger.info("Too many consecutive actions, forcing final answer")
                     state["current_step"] = f"Thought: I've used the same tool too many times. I should provide a final answer.\nFinal Answer: I apologize for the confusion. Let me help you with that directly. What would you like to do?"
                     return state
                 
-                # Handle tools that don't need input
-                if action in ["ViewAppointments", "HandleGreeting", "GetPurposeExamples"]:
-                    try:
-                        logger.info(f"Executing {action} tool")
-                        tool_index = {
-                            "ViewAppointments": 1,
-                            "HandleGreeting": 2,
-                            "GetPurposeExamples": 3
-                        }[action]
-                        result = tools[tool_index].func(None)
-                        logger.info(f"Tool result: {result}")
-                        state["messages"].append({
-                            "role": "assistant",
-                            "content": f"Action: {action}\nObservation: {result}"
-                        })
-                    except Exception as e:
-                        logger.error(f"Tool execution error: {e}")
-                        state["messages"].append({
-                            "role": "assistant",
-                            "content": f"Error executing {action}: {str(e)}"
-                        })
-                else:
-                    # Handle BookAppointment tool
-                    if action_input_match:
-                        action_input = action_input_match.group(1).strip()
-                        logger.info(f"Tool input: {action_input}")
-                        
-                        # Try to parse action input as JSON
-                        if action_input.startswith('{') and action_input.endswith('}'):
-                            try:
-                                action_input = json.loads(action_input)
-                                logger.info(f"Parsed JSON input: {action_input}")
-                            except json.JSONDecodeError as e:
-                                logger.error(f"Failed to parse JSON: {e}")
-                        
-                        # Execute the tool
+                result_content = ""
+                if action in tool_map:
+                    selected_tool = tool_map[action]
+                    tool_input = None # Default for tools not needing input
+                    action_input_str = "" # For logging
+
+                    if selected_tool.name == "BookAppointment":
+                        if action_input_match:
+                            action_input_str = action_input_match.group(1).strip()
+                            logger.info(f"BookAppointment raw input: {action_input_str}")
+                            # Try to parse action input as JSON
+                            if action_input_str.startswith('{') and action_input_str.endswith('}'):
+                                try:
+                                    tool_input = json.loads(action_input_str)
+                                    logger.info(f"Parsed JSON input for BookAppointment: {tool_input}")
+                                except json.JSONDecodeError as e:
+                                    logger.error(f"Failed to parse JSON for BookAppointment: {e}")
+                                    result_content = f"Error: Invalid JSON input for BookAppointment: {e}"
+                            else:
+                                # If not JSON, it might be a simple string or malformed.
+                                # The tool itself might handle this, or we can enforce JSON here.
+                                # For now, pass it as is if not parsable as JSON and log.
+                                tool_input = action_input_str
+                                logger.warning(f"BookAppointment input is not JSON: {action_input_str}")
+                                # Depending on strictness, could set result_content to an error here.
+                        else:
+                            logger.error("Error: Missing input for BookAppointment.")
+                            result_content = "Error: Missing Action Input for BookAppointment."
+
+                    if not result_content: # If no error so far
                         try:
-                            logger.info(f"Executing tool: {action}")
-                            result = tools[0].func(action_input)  # BookAppointment is the first tool
+                            logger.info(f"Executing {selected_tool.name} tool with input: {tool_input}")
+                            result = selected_tool.func(tool_input)
                             logger.info(f"Tool result: {result}")
-                            state["messages"].append({
-                                "role": "assistant",
-                                "content": f"Action: {action}\nAction Input: {action_input}\nObservation: {result}"
-                            })
-                            # Reset booking info after successful booking
-                            state["booking_info"] = {
-                                "name": None,
-                                "date": None,
-                                "time": None,
-                                "purpose": None
-                            }
-                            # Reset action tracking
-                            self.last_action = None
-                            self.action_count = 0
+
+                            if selected_tool.name == "BookAppointment" and "successfully booked" in result.lower():
+                                # Reset booking info after successful booking
+                                state["booking_info"] = {
+                                    "name": None,
+                                    "date": None,
+                                    "time": None,
+                                    "purpose": None
+                                }
+                                # Reset action tracking
+                                state["last_action"] = None
+                                state["action_count"] = 0
+
+                            # Construct message content based on whether there was an input
+                            if action_input_str :
+                                result_content = f"Action: {action}\nAction Input: {action_input_str}\nObservation: {result}"
+                            else:
+                                result_content = f"Action: {action}\nObservation: {result}"
+
                         except Exception as e:
-                            logger.error(f"Tool execution error: {e}")
-                            state["messages"].append({
-                                "role": "assistant",
-                                "content": f"Error executing {action}: {str(e)}"
-                            })
+                            logger.error(f"Tool execution error for {selected_tool.name}: {e}")
+                            result_content = f"Error executing {action}: {str(e)}"
+                else:
+                    logger.error(f"Error: Tool '{action}' not found.")
+                    result_content = f"Error: Tool '{action}' not found."
+
+                state["messages"].append({
+                    "role": "assistant",
+                    "content": result_content
+                })
+
+                # This part seems to be a leftover or incorrect, as BookAppointment is handled above.
+                # It implies that 'else' block of 'if action in ["ViewAppointments", ...]' is only for BookAppointment
+                # which is not true if more tools are added.
+                # The following block for BookAppointment specific logic (like resetting state)
+                # should be integrated within the `if selected_tool.name == "BookAppointment":` block.
+                # For now, I am commenting out the redundant part.
+
+                # else:
+                    # Handle BookAppointment tool - THIS LOGIC IS NOW MOVED/INTEGRATED ABOVE
+                    # if action_input_match:
+                    #     action_input = action_input_match.group(1).strip()
+                    #     logger.info(f"Tool input: {action_input}")
+                        
+                    #     # Try to parse action input as JSON
+                    #     if action_input.startswith('{') and action_input.endswith('}'):
+                    #         try:
+                    #             action_input = json.loads(action_input)
+                    #             logger.info(f"Parsed JSON input: {action_input}")
+                    #         except json.JSONDecodeError as e:
+                    #             logger.error(f"Failed to parse JSON: {e}")
+                        
+                    #     # Execute the tool
+                    #     try:
+                    #         logger.info(f"Executing tool: {action}")
+                    #         # result = tools[0].func(action_input)  # BookAppointment is the first tool
+                                        # THIS IS THE KEY CHANGE - use tool_map
+                    #         selected_tool = tool_map[action] # Assuming action is "BookAppointment"
+                    #         result = selected_tool.func(action_input)
+
+                    #         logger.info(f"Tool result: {result}")
+                    #         state["messages"].append({
+                    #             "role": "assistant",
+                    #             "content": f"Action: {action}\nAction Input: {action_input}\nObservation: {result}"
+                    #         })
+                            # Reset booking info after successful booking
             
             return state
 
