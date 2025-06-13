@@ -87,21 +87,39 @@ class AppointmentAgent:
                 "Your goal is to be immediately helpful and engaging based on their initial statement."
             ),
             CS_GENERAL_INQUIRY: (
-                "You are in the GENERAL_INQUIRY state. The user's immediate need isn't yet a specific task like booking or viewing. "
-                "Review the {history} to understand how you got to this state. "
-                "If the user just indicated they are new or asked for general help in the previous turn, be proactive. "
-                "Offer to explain the booking process, show examples of appointment purposes (consider using GetPurposeExamples tool if they seem unsure where to start), or ask open-ended guiding questions to help them formulate their request. "
+                "You are in the GENERAL_INQUIRY state. The user's immediate need isn't a specific task, or they haven't clearly affirmed a direct offer you made. "
+                "Review the {history} carefully. "
+
+                "If you just made a booking offer (e.g., 'Shall I book X for you?') and the user's response was NOT a clear 'yes' (leading here), "
+                "first try to understand their response. They might have a question, a hesitation, or want to modify something. Address that first. "
+                "Example: If you offered to book 'Dental Checkup' and user said 'hmm, how long does that take?', answer the question, then gently ask if they still want to book it or need other info. "
+
+                "If the user previously indicated they are new or asked for general help, and you haven't yet provided substantial guidance: "
+                "Be proactive. Offer to explain the booking process, or suggest showing examples of appointment purposes (consider GetPurposeExamples tool if they seem broadly unsure). "
                 "Example for a new user: 'Since you're new, I can quickly explain how booking works, or I can show you some example appointment reasons. What would be more helpful for you right now?' "
-                "For other general inquiries, listen carefully and politely ask clarifying questions to guide them towards a task you can perform (booking, viewing, examples). "
-                "Your aim is to help the user figure out how you can assist them."
+
+                "For other general inquiries, or if the user seems to be exploring options after declining a specific offer: "
+                "Listen carefully, politely ask clarifying questions to guide them towards a task you can perform (booking, viewing, examples). "
+                "Avoid immediately re-offering 'GetPurposeExamples' if they just sidestepped a specific booking offer, unless they explicitly ask for alternatives or seem lost. Focus on their last statement. "
+                "Your aim is to understand their current need and help them navigate to a solution."
             ),
             CS_COLLECTING_BOOKING_INFO: (
                 "You are in the COLLECTING_BOOKING_INFO state. Your goal is to gather all necessary details for an appointment. "
-                "Refer to {booking_info} to see what's already collected. Check {history} for recent user inputs. "
-                "Politely ask for the required information (name, date YYYY-MM-DD, time HH:MM, purpose) one by one if not provided. "
-                "If the user provides information out of order, acknowledge it, store it, and ask for the next logical piece. "
-                "Example: If they give a time first, say: 'Okay, {time} noted. What date would you like for this appointment?' "
-                "Be encouraging and clear. If they say 'yes' or 'correct' to a piece of info you suggested, confirm it and move on."
+                "Review {booking_info} to see what's already collected. Also, check {history} for recent user inputs. "
+
+                "If {booking_info[purpose]} is already set (e.g., from a previous confirmation or user statement), start by acknowledging it. "
+                "Example if purpose is known: 'Okay, we're setting up your {booking_info[purpose]} appointment. ' "
+                "Then, proceed to ask for the next piece of missing information in a logical order (typically: name, then date YYYY-MM-DD, then time HH:MM). "
+                "If {booking_info[name]} is also known, acknowledge that too: 'For {booking_info[name]} for the {booking_info[purpose]} appointment...' "
+
+                "If a piece of information is provided by the user in their last message, acknowledge it and then ask for the next missing item. "
+                "Example if user just provided name: 'Thanks, {booking_info[name]}. Now, what date would you like for this appointment (in YYYY-MM-DD format)?' "
+                "Example if user just provided date: 'Got it, {booking_info[date]}. And what time (in HH:MM 24-hour format)?' "
+                "Example if user just provided time: 'Perfect, {booking_info[time]}. Lastly, what is the purpose of this appointment?' (Only ask purpose if not already known). "
+
+                "If the user provides information out of order, acknowledge it, ensure it's stored in booking_info, and then ask for the next logical piece. "
+                "Be encouraging and clear. If they say 'yes' or 'correct' to a piece of info you suggested (though less likely in this state unless you are confirming a format), confirm it and move on. "
+                "Your goal is to fill all fields in {booking_info}: name, date, time, and purpose."
             ),
             CS_CONFIRMING_BOOKING_INFO: (
                 "You are in the CONFIRMING_BOOKING_INFO state. You should have all details: {booking_info[name]}, {booking_info[date]}, {booking_info[time]}, {booking_info[purpose]}. "
@@ -249,36 +267,83 @@ class AppointmentAgent:
             current_conversation_state_for_prompt = state.get("conversation_state", CS_INITIAL_GREETING)
             logger.info(f"Current conversational state (start of call_agent): {current_conversation_state_for_prompt}")
 
-            if current_conversation_state_for_prompt == CS_INITIAL_GREETING:
-                user_input_lower = last_message.lower()
-                if any(phrase in user_input_lower for phrase in ["new here", "am new", "help", "what can you do", "how does this work", "guide me", "get started"]):
-                    state["conversation_state"] = CS_GENERAL_INQUIRY
-                    logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to new user/help query.")
-                elif len(last_message) > 15 or any(kw in user_input_lower for kw in ["book", "appointment", "view", "schedule", "check"]):
-                    state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
-                    logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to specific intent.")
-                else:
-                    state["conversation_state"] = CS_GENERAL_INQUIRY
-                    logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} for general/short input.")
+            agents_previous_content = ""
+            potential_purpose_from_offer = None
+            made_booking_offer = False
 
-            elif current_conversation_state_for_prompt == CS_POST_BOOKING_FEEDBACK:
-                logger.info(f"Processing user response ('{last_message}') in CS_POST_BOOKING_FEEDBACK.")
-                if any(kw in last_message.lower() for kw in ["no", "nothing", "nope", "don't", "not now", "that's all", "that is all", "finished", "done", "bye"]):
-                    state["conversation_state"] = CS_ENDING_CONVERSATION
-                    logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} based on user response.")
-                elif not last_message:
-                    state["conversation_state"] = CS_ENDING_CONVERSATION
-                    logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} due to empty input.")
-                else:
-                    state["conversation_state"] = CS_GENERAL_INQUIRY
-                    logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_GENERAL_INQUIRY} to handle new/unclear request: {last_message}")
+            if len(state["messages"]) >= 2:
+                if state["messages"][-2]["role"] == "assistant":
+                    raw_prev_agent_msg = state["messages"][-2]["content"]
+                    if "Final Answer:" in raw_prev_agent_msg:
+                        agents_previous_content = raw_prev_agent_msg.split("Final Answer:", 1)[-1].strip()
+                    else:
+                        agents_previous_content = raw_prev_agent_msg
 
-            elif current_conversation_state_for_prompt == CS_ENDING_CONVERSATION:
-                if last_message:
-                    state["conversation_state"] = CS_GENERAL_INQUIRY
-                    logger.info(f"User provided new input ('{last_message}') after conversation was ending. Transitioning from {CS_ENDING_CONVERSATION} to {CS_GENERAL_INQUIRY}.")
+            if agents_previous_content:
+                booking_offer_patterns = [
+                    r"book a '([^']+)' for you", r"book '([^']+)'", r"booking '([^']+)'",
+                    r"proceed with booking for '([^']+)'",
+                    "book for you?", "proceed with booking?", "shall I book", "like me to book"
+                ]
+                for pattern in booking_offer_patterns:
+                    if "([^']+)" in pattern:
+                        match = re.search(pattern, agents_previous_content, re.IGNORECASE)
+                        if match:
+                            try:
+                                potential_purpose_from_offer = match.group(1)
+                            except IndexError:
+                                potential_purpose_from_offer = None
+                            made_booking_offer = True
+                            logger.info(f"Detected booking offer with potential purpose: '{potential_purpose_from_offer}' from pattern '{pattern}' in: '{agents_previous_content}'")
+                            break
+                    elif pattern.lower() in agents_previous_content.lower():
+                        made_booking_offer = True
+                        logger.info(f"Detected general booking offer from pattern '{pattern}' in: '{agents_previous_content}'")
+                        break
 
-            if current_conversation_state_for_prompt in [CS_INITIAL_GREETING, CS_COLLECTING_BOOKING_INFO, CS_GENERAL_INQUIRY, CS_CONFIRMING_BOOKING_INFO]:
+            affirmative_responses = ["yes", "yeah", "sure", "okay", "ok", "please", "do it", "proceed", "sounds good", "great"]
+            user_affirmed = last_message.lower() in affirmative_responses or \
+                            any(affirmative in last_message.lower().split() for affirmative in affirmative_responses)
+
+            if made_booking_offer and user_affirmed:
+                logger.info(f"User affirmed a previous booking offer. Last agent msg: '{agents_previous_content}', User input: '{last_message}'")
+                state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
+                current_conversation_state_for_prompt = CS_COLLECTING_BOOKING_INFO
+                if potential_purpose_from_offer and state["booking_info"]["purpose"] is None:
+                    state["booking_info"]["purpose"] = potential_purpose_from_offer
+                    logger.info(f"Pre-filled purpose from offer: '{potential_purpose_from_offer}'")
+            else:
+                if current_conversation_state_for_prompt == CS_INITIAL_GREETING:
+                    user_input_lower = last_message.lower()
+                    if any(phrase in user_input_lower for phrase in ["new here", "am new", "help", "what can you do", "how does this work", "guide me", "get started"]):
+                        state["conversation_state"] = CS_GENERAL_INQUIRY
+                        logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to new user/help query.")
+                    elif len(last_message) > 15 or any(kw in user_input_lower for kw in ["book", "appointment", "view", "schedule", "check"]):
+                        state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
+                        logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to specific intent.")
+                    else:
+                        state["conversation_state"] = CS_GENERAL_INQUIRY
+                        logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} for general/short input.")
+
+                elif current_conversation_state_for_prompt == CS_POST_BOOKING_FEEDBACK:
+                    logger.info(f"Processing user response ('{last_message}') in CS_POST_BOOKING_FEEDBACK.")
+                    if any(kw in last_message.lower() for kw in ["no", "nothing", "nope", "don't", "not now", "that's all", "that is all", "finished", "done", "bye"]):
+                        state["conversation_state"] = CS_ENDING_CONVERSATION
+                        logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} based on user response.")
+                    elif not last_message:
+                        state["conversation_state"] = CS_ENDING_CONVERSATION
+                        logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} due to empty input.")
+                    else:
+                        state["conversation_state"] = CS_GENERAL_INQUIRY
+                        logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_GENERAL_INQUIRY} to handle new/unclear request: {last_message}")
+
+                elif current_conversation_state_for_prompt == CS_ENDING_CONVERSATION:
+                    if last_message:
+                        state["conversation_state"] = CS_GENERAL_INQUIRY
+                        logger.info(f"User provided new input ('{last_message}') after conversation was ending. Transitioning from {CS_ENDING_CONVERSATION} to {CS_GENERAL_INQUIRY}.")
+
+            if current_conversation_state_for_prompt in [CS_INITIAL_GREETING, CS_COLLECTING_BOOKING_INFO, CS_GENERAL_INQUIRY, CS_CONFIRMING_BOOKING_INFO] or \
+               (made_booking_offer and user_affirmed):
                 if not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 2:
                     if state["booking_info"]["name"] is None : state["booking_info"]["name"] = last_message
 
@@ -290,7 +355,8 @@ class AppointmentAgent:
                 if time_match:
                     if state["booking_info"]["time"] is None : state["booking_info"]["time"] = time_match.group(0)
 
-                if len(last_message.split()) > 3 and not date_match and not time_match and state["booking_info"]["purpose"] is None:
+                if len(last_message.split()) > 3 and not date_match and not time_match and \
+                   state["booking_info"]["purpose"] is None and not (made_booking_offer and user_affirmed and potential_purpose_from_offer):
                     if current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO :
                          state["booking_info"]["purpose"] = last_message
             
@@ -436,3 +502,5 @@ class AppointmentAgent:
         app = workflow.compile()
         
         return app
+
+[end of appointment_system/agent.py]
