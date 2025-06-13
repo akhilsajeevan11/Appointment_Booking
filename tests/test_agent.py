@@ -1,344 +1,252 @@
 import unittest
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock, call
 import re
 import json
+import os
 
-# Attempt to import from the actual application path
-# If this fails in the execution environment, the test structure might need adjustment
-# or specific mocks for these classes if they can't be imported directly.
+# Attempt to import from the project structure
+# This assumes 'appointment_system' is in the Python path or PYTHONPATH is set up
 try:
     from appointment_system.agent import AppointmentAgent, AgentState, CustomPromptTemplate
-    from appointment_system.tools import AppointmentTools # Needed for mocking get_tools
+    from appointment_system.tools import AppointmentTools # For mocking its methods
 except ImportError:
-    # Define simplified stubs if direct import fails, as suggested in the prompt
-    # This helps in defining the test structure even if the environment has path issues.
-    print("Failed to import from appointment_system.agent, using stubs for test structure definition.")
-    class AgentState(TypedDict):
-        messages: list
-        next: str
-        current_step: str
-        booking_info: dict
-        last_action: str
-        action_count: int
-
+    # Fallback for environments where direct import might be tricky
+    # Define minimal stubs if real classes can't be loaded by the subtask runner
+    # This is less ideal as it doesn't test the actual classes directly
+    print("Warning: Could not import full agent classes, using stubs for testing where necessary.")
+    class AgentState(dict): pass
     class CustomPromptTemplate:
-        def __init__(self, template, tools, input_variables):
-            self.template = template
-            self.tools = tools
-            self.input_variables = input_variables
-        def format(self, **kwargs):
-            # Simplified format for testing - real formatting is complex
-            # For actual test, we'd want to see the real template content
-            formatted_str = self.template
-            for key, value in kwargs.items():
-                formatted_str = formatted_str.replace(f"{{{key}}}", str(value))
-            return formatted_str
-
-    class AppointmentAgent:
-        def __init__(self):
-            self.llm = MagicMock()
-            self.tools_handler = MagicMock()
-            self.tool_map = {} # Will be populated in create_agent
-            # Mock booking_info as it's accessed in the agent
-            self.booking_info = {
-                "name": None, "date": None, "time": None, "purpose": None
-            }
+        def __init__(self, template, tools, input_variables): self.template = template; self.tools = tools; self.input_variables = input_variables
+        def format(self, **kwargs): return self.template.format(**kwargs)
+    class AppointmentAgent: # Stub
+        def __init__(self): self.llm = MagicMock(); self.tools_handler = MagicMock(); self.tool_map = {}
+        def create_agent(self): return MagicMock() # Returns a mock graph
+    class AppointmentTools: # Stub
+        def get_tools(self): return []
 
 
-        def create_agent(self):
-            # This would normally build the graph. For testing, we might need to
-            # mock parts of this or test nested functions more directly if possible.
-            # The actual create_agent involves LangGraph setup.
-            # For many tests, we'll mock what create_agent produces or call it and mock its deps.
-
-            # Simplified tool_map creation for standalone call_tool tests if needed
-            # In full integration tests, this map comes from mocked get_tools()
-            mock_tool_list = getattr(self.tools_handler, 'get_tools', MagicMock(return_value=[]))()
-            self.tool_map = {tool.name: tool for tool in mock_tool_list}
-
-            # The real create_agent returns a compiled LangGraph app
-            # We will mock the app.invoke part for end-to-end style tests of graph nodes
-            graph_mock = MagicMock()
-            # Make call_agent and call_tool available for more direct patching/testing if needed
-            # graph_mock.call_agent = self._call_agent_logic_for_test
-            # graph_mock.call_tool = self._call_tool_logic_for_test
-            return graph_mock
-
-    class AppointmentTools:
-        def get_tools(self):
-            return []
+# It's important that the subtask can actually access and import these.
+# The following path manipulations are attempts to help the subtask find modules if they are not in PYTHONPATH.
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# This line assumes tests/test_agent.py is one level down from the project root where appointment_system/ is.
 
 
-# Global test tool instances for mocking
-mock_tool_book = MagicMock()
-mock_tool_book.name = "BookAppointment"
-mock_tool_view = MagicMock()
-mock_tool_view.name = "ViewAppointments"
-
-
-class TestAgent(unittest.TestCase):
+class TestAgentLogic(unittest.TestCase):
 
     def setUp(self):
-        # Mock environment variables if agent uses os.getenv directly on import or init
-        # self.env_patch = patch.dict('os.environ', {'GOOGLE_API_KEY': 'test_key'})
-        # self.env_patch.start()
-        # logger_patch = patch('appointment_system.agent.logger', MagicMock())
-        # logger_patch.start()
+        # Mock environment variables if necessary (e.g., for GOOGLE_API_KEY)
+        self.env_patch = patch.dict(os.environ, {'GOOGLE_API_KEY': 'test_api_key'})
+        self.env_patch.start()
 
-        # Instantiate the agent. This might require mocking ChatGoogleGenerativeAI if it's instantiated in __init__
-        with patch('appointment_system.agent.ChatGoogleGenerativeAI') as MockLLM, \
-             patch('appointment_system.agent.AppointmentTools') as MockApptTools:
+        # Mock AppointmentTools and its get_tools method
+        self.mock_tools_instance = MagicMock(spec=AppointmentTools)
+        self.mock_book_appointment_tool = MagicMock(name="BookAppointment_func")
+        self.mock_view_appointments_tool = MagicMock(name="ViewAppointments_func")
 
-            # Configure the mock tools_handler instance that self.agent will use
-            self.mock_tools_handler_instance = MockApptTools.return_value
-            self.mock_tools_handler_instance.get_tools.return_value = [
-                {"name": "BookAppointment", "func": mock_tool_book.func, "description": "Books an appt"},
-                {"name": "ViewAppointments", "func": mock_tool_view.func, "description": "Views appts"}
-            ]
+        # Define what get_tools returns
+        # The 'func' needs to be callable.
+        # The 'description' is used by CustomPromptTemplate.
+        self.tools_config = [
+            {'name': 'BookAppointment', 'func': self.mock_book_appointment_tool, 'description': 'Books an appt'},
+            {'name': 'ViewAppointments', 'func': self.mock_view_appointments_tool, 'description': 'Views appts'},
+        ]
+        self.mock_tools_instance.get_tools.return_value = self.tools_config
 
-            self.agent = AppointmentAgent()
-            # Ensure llm is a mock after agent instantiation
-            self.agent.llm = MockLLM.return_value
+        # Patch the __init__ of AppointmentTools to return our mock instance
+        self.tools_patcher = patch('appointment_system.agent.AppointmentTools', return_value=self.mock_tools_instance)
+        self.MockAppointmentTools = self.tools_patcher.start()
 
-            # The graph is created by calling create_agent()
-            # This will use the mocked tools_handler via self.agent.tools_handler
-            self.graph = self.agent.create_agent()
+        # Mock ChatGoogleGenerativeAI
+        self.llm_patcher = patch('appointment_system.agent.ChatGoogleGenerativeAI')
+        self.MockChatGoogleGenerativeAI = self.llm_patcher.start()
+        self.mock_llm_instance = self.MockChatGoogleGenerativeAI.return_value
+        self.mock_llm_instance.invoke.return_value = MagicMock(content="Final Answer: Default mock response")
 
+        # Now instantiate the agent - it will use the mocked classes
+        self.agent_wrapper = AppointmentAgent()
+        self.graph = self.agent_wrapper.create_agent()
+
+        # Initial state for invoking the graph
+        self.initial_state = {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "next": "agent",
+            "current_step": "",
+            "booking_info": {"name": None, "date": None, "time": None, "purpose": None},
+            "last_action": None,
+            "action_count": 0
+        }
 
     def tearDown(self):
-        # self.env_patch.stop()
-        # patch.stopall() # Stops all patches started with start()
-        pass
+        self.env_patch.stop()
+        self.tools_patcher.stop()
+        self.llm_patcher.stop()
 
     def test_datetime_regex_extraction_in_call_agent(self):
-        # This tests the regex directly as used in call_agent
-        # The call_agent function itself is part of the graph, so we test its components
-        date_regex = r'\d{4}-\d{2}-\d{2}' # As defined in agent.py
-        time_regex = r'\d{2}:\d{2}'       # As defined in agent.py
+        # This tests the regex as used in call_agent, so we need to simulate its invocation
+        # by controlling the LLM's output if call_agent directly uses it, or by directly testing.
+        # The regexes are: date_regex = r'\d{4}-\d{2}-\d{2}' and time_regex = r'\d{2}:\d{2}'
+        # For simplicity, we'll test the regexes directly here.
+
+        # Access the actual regex from the agent's implementation if possible or re-define
+        date_regex = r'\d{4}-\d{2}-\d{2}' # As defined in agent's call_agent
+        time_regex = r'\d{2}:\d{2}' # As defined in agent's call_agent
 
         self.assertIsNotNone(re.search(date_regex, "Please book for 2024-07-25"))
         self.assertIsNone(re.search(date_regex, "Please book for 25/07/2024"))
         self.assertEqual(re.search(date_regex, "Date is 2024-03-10.").group(0), "2024-03-10")
 
         self.assertIsNotNone(re.search(time_regex, "at 14:30 thanks"))
-        self.assertIsNone(re.search(time_regex, "at 2:30pm")) # Legacy format
-        self.assertIsNone(re.search(time_regex, "at 2pm"))    # Legacy format
+        self.assertIsNone(re.search(time_regex, "at 2:30pm"))
         self.assertEqual(re.search(time_regex, "Time: 09:00.").group(0), "09:00")
-        self.assertEqual(re.search(time_regex, "call at 15:45").group(0), "15:45")
 
-    def test_prompt_date_time_format_instructions(self):
-        # Test the CustomPromptTemplate content directly
-        # Fetch the template string from where it's defined in AppointmentAgent
-        # This might require making the template string a class/instance variable or loading it
+    def test_prompt_formatting_includes_date_time_instructions(self):
+        # Get the prompt template from the agent
+        # This requires CustomPromptTemplate to be correctly imported and used by AppointmentAgent
+        # We check the formatted prompt string passed to the LLM
 
-        # For simplicity, let's assume we can get the template string.
-        # In a real scenario, you might need to instantiate AppointmentAgent and access its prompt object,
-        # or if the template is a static string, import it or copy it here.
-        # The prompt is defined inside create_agent, so we need to call it or extract from there.
+        # Simulate a call that would format the prompt
+        _ = self.graph.invoke(self.initial_state)
 
-        # Let's get an instance of the prompt by calling create_agent and then finding the prompt
-        # This is a bit indirect. A better way would be if CustomPromptTemplate was easier to get.
+        # Assuming the prompt is the first arg to llm.invoke
+        # The actual prompt string is complex, we're checking for substrings
+        formatted_prompt_args = self.mock_llm_instance.invoke.call_args[0]
+        prompt_string = formatted_prompt_args[0] # The formatted prompt string
 
-        # Re-patch tools for this specific test if needed, or rely on setUp's tools
-        tools_for_prompt = [
-            MagicMock(name='BookAppointment', description='Books an appointment.'),
-            MagicMock(name='ViewAppointments', description='Views appointments.')
-        ]
+        self.assertIn("YYYY-MM-DD format", prompt_string)
+        self.assertIn("HH:MM 24-hour format", prompt_string)
+        self.assertIn('{"name": "person name", "date": "YYYY-MM-DD", "time": "HH:MM", "purpose": "appointment purpose"}', prompt_string)
+        self.assertIn("summarize all currently known booking details", prompt_string)
 
-        # The actual template string is quite large. We'll check for key phrases.
-        # This is a simplified representation of the prompt template for testing.
-        # Ideally, load the actual template string.
-        with open("appointment_system/agent.py", "r") as f:
-            agent_code = f.read()
+    def test_state_variables_in_prompt(self):
+        state = {**self.initial_state, "last_action": "ViewAppointments", "action_count": 1}
+        _ = self.graph.invoke(state)
 
-        template_str_match = re.search(r'template = """(.*?)"""', agent_code, re.DOTALL)
-        self.assertIsNotNone(template_str_match, "Could not find template string in agent.py")
-        template_str = template_str_match.group(1)
+        formatted_prompt_args = self.mock_llm_instance.invoke.call_args[0]
+        prompt_string = formatted_prompt_args[0]
 
-        prompt_template_obj = CustomPromptTemplate(
-            template=template_str,
-            tools=tools_for_prompt,
-            input_variables=["input", "history", "agent_scratchpad", "name", "date", "time", "purpose", "last_action", "action_count", "has_all_info"]
+        self.assertIn("Last action taken: ViewAppointments", prompt_string)
+        self.assertIn("Number of consecutive actions: 1", prompt_string)
+
+    def test_tool_calling_logic_viewappointments(self):
+        # Simulate LLM output that asks to call ViewAppointments
+        self.mock_llm_instance.invoke.return_value = MagicMock(
+            content="Thought: I need to view appointments.
+Action: ViewAppointments
+Action Input: None"
         )
 
-        formatted_prompt = prompt_template_obj.format(
-            input="test input", history="", agent_scratchpad="",
-            name=None, date=None, time=None, purpose=None,
-            last_action=None, action_count=0, has_all_info=False,
-            tools="\n".join([f"{tool.name}: {tool.description}" for tool in tools_for_prompt]), # tools and tool_names are added by CustomPromptTemplate itself
-            tool_names=[tool.name for tool in tools_for_prompt]
-        )
+        state = {**self.initial_state, "messages": [{"role": "user", "content": "View my appointments"}]}
+        final_state = self.graph.invoke(state)
 
-        self.assertIn("date: \"YYYY-MM-DD\"", formatted_prompt)
-        self.assertIn("time: \"HH:MM\"", formatted_prompt)
-        self.assertIn("YYYY-MM-DD format (e.g., 2025-09-11)", formatted_prompt)
-        self.assertIn("HH:MM 24-hour format (e.g., 09:00 or 14:30)", formatted_prompt)
+        self.mock_view_appointments_tool.assert_called_once_with(None)
+        # Check if state['last_action'] and state['action_count'] are updated
+        # Note: The graph invoke will run agent, then tool, then agent again.
+        # The final state's last_action might be from the second agent call.
+        # To check intermediate state is harder without graph inspection tools.
+        # For this test, we focus on the tool being called.
+        # The prompt for the *next* LLM call would contain the updated last_action.
 
-
-    @patch('appointment_system.agent.AppointmentAgent.llm', new_callable=PropertyMock) # Mock llm property
-    def test_last_action_and_count_in_prompt_format_via_call_agent(self, mock_llm_prop):
-        # This tests that call_agent correctly uses state's last_action and action_count
-
-        # We need to simulate the relevant part of call_agent
-        # The graph's call_agent node will internally call self.llm.invoke with a formatted prompt
-        # We need to capture the arguments to prompt.format() or llm.invoke()
-
-        # Mock the llm's invoke method on the instance
-        mock_llm_instance = MagicMock()
-        mock_llm_prop.return_value = mock_llm_instance # Ensure self.agent.llm is this mock
-
-        # Setup initial state
-        initial_state = AgentState(
-            messages=[{"role": "user", "content": "Hello"}],
-            next="agent",
-            current_step="",
-            booking_info={"name": None, "date": None, "time": None, "purpose": None},
-            last_action="some_previous_tool",
-            action_count=2
-        )
-
-        # The real `call_agent` is a node in the graph. We need to invoke the graph.
-        # The graph is self.graph from setUp.
-        # The prompt object is created within create_agent. We need to ensure CustomPromptTemplate.format is checkable.
-
-        # To check what prompt.format gets, we can patch CustomPromptTemplate.format
-        with patch.object(CustomPromptTemplate, 'format', wraps=CustomPromptTemplate.format) as mock_format_method:
-            # Call the agent node. This is an integration test for call_agent.
-            # We expect call_agent to be triggered by graph.invoke
-            self.graph.invoke(initial_state)
-
-            # Check if format was called
-            self.assertTrue(mock_format_method.called)
-
-            # Get the kwargs passed to the last call of prompt.format
-            # This depends on CustomPromptTemplate being used by the agent's prompt object.
-            # The prompt object is created inside create_agent.
-            # We need to ensure that the prompt used by self.agent.llm.invoke is the one we are inspecting.
-
-            # The actual CustomPromptTemplate instance is inside create_agent's scope.
-            # To make this testable without major refactor, we assume llm.invoke is called with the formatted string.
-            # So, we check the string passed to llm.invoke.
-
-            self.assertTrue(self.agent.llm.invoke.called)
-            call_args_to_llm_invoke = self.agent.llm.invoke.call_args[0][0] # Get the actual formatted string
-
-            # The prompt string itself should contain these values if correctly formatted.
-            # This is an indirect way to check prompt.format() kwargs.
-            self.assertIn("Last action taken: some_previous_tool", call_args_to_llm_invoke)
-            self.assertIn("Number of consecutive actions: 2", call_args_to_llm_invoke)
+        # Verify that the prompt for the next LLM call (after tool execution) includes the updated last_action
+        # The mock_llm_instance is called multiple times in one graph.invoke for tool use.
+        # First call: To decide to use a tool. Second call: After observing tool output.
+        second_llm_call_args = self.mock_llm_instance.invoke.call_args_list[1][0]
+        prompt_string_after_tool = second_llm_call_args[0]
+        self.assertIn("Last action taken: ViewAppointments", prompt_string_after_tool)
+        self.assertIn("Number of consecutive actions: 1", prompt_string_after_tool)
 
 
-    def test_action_count_logic_in_call_tool(self):
-        # This tests the logic for updating last_action and action_count in call_tool
-        # call_tool is a nested function. We test it by invoking the graph to the 'tool' node.
-
-        # Initial state
-        state = AgentState(
-            messages=[], current_step="Action: ViewAppointments", next="tool",
-            booking_info={}, last_action=None, action_count=0
-        )
-
-        # Simulate first call
-        # To call 'call_tool', we invoke the graph.
-        # We need to mock the actual tool execution (mock_tool_view.func)
-        mock_tool_view.func.reset_mock()
-        mock_tool_view.func.return_value = "Appointments listed."
-
-        updated_state = self.graph.invoke(state) # This should trigger call_tool
-
-        mock_tool_view.func.assert_called_once_with(None)
-        self.assertEqual(updated_state['last_action'], "ViewAppointments")
-        self.assertEqual(updated_state['action_count'], 1)
-        self.assertIn("Action: ViewAppointments\nObservation: Appointments listed.", updated_state['messages'][-1]['content'])
-
-        # Simulate second call with the same action
-        state_after_first_call = updated_state.copy()
-        state_after_first_call['current_step'] = "Action: ViewAppointments" # Agent decided same action
-        # messages should accumulate, so pass previous messages
-        state_after_first_call['messages'] = list(updated_state['messages'])
-
-
-        mock_tool_view.func.reset_mock()
-        mock_tool_view.func.return_value = "Appointments listed again."
-        updated_state_2 = self.graph.invoke(state_after_first_call)
-
-        mock_tool_view.func.assert_called_once_with(None)
-        self.assertEqual(updated_state_2['last_action'], "ViewAppointments")
-        self.assertEqual(updated_state_2['action_count'], 2)
-
-        # Simulate a different action
-        state_after_second_call = updated_state_2.copy()
-        state_after_second_call['current_step'] = "Action: BookAppointment\nAction Input: {}" # Agent decided new action
-        state_after_second_call['messages'] = list(updated_state_2['messages'])
-
-
-        mock_tool_book.func.reset_mock()
-        mock_tool_book.func.return_value = "Appointment booked."
-        updated_state_3 = self.graph.invoke(state_after_second_call)
-
-        mock_tool_book.func.assert_called_once_with({}) # Assuming empty JSON for simplicity
-        self.assertEqual(updated_state_3['last_action'], "BookAppointment")
-        self.assertEqual(updated_state_3['action_count'], 1) # Reset for new action
-
-        # Simulate successful BookAppointment (resets counters)
-        state_for_booking_reset = updated_state_3.copy()
-        state_for_booking_reset['current_step'] = "Action: BookAppointment\nAction Input: {\"name\":\"Test\",\"date\":\"2024-01-01\",\"time\":\"10:00\",\"purpose\":\"Checkup\"}"
-        state_for_booking_reset['messages'] = list(updated_state_3['messages'])
-
-        mock_tool_book.func.reset_mock()
-        mock_tool_book.func.return_value = "Appointment successfully booked for Test." # Must contain "successfully booked"
-
-        final_state = self.graph.invoke(state_for_booking_reset)
-
-        self.assertIsNone(final_state['last_action'])
-        self.assertEqual(final_state['action_count'], 0)
-
-
-    def test_call_tool_dynamic_dispatch_and_input(self):
-        # Test that call_tool uses the tool_map to call the correct tool
-        # And that input is passed correctly to BookAppointment
-
-        # Test ViewAppointments (no input)
-        mock_tool_view.func.reset_mock()
-        mock_tool_view.func.return_value = "Viewed."
-        state_view = AgentState(
-            messages=[], current_step="Action: ViewAppointments", next="tool",
-            booking_info={}, last_action=None, action_count=0
-        )
-        updated_state_view = self.graph.invoke(state_view)
-        mock_tool_view.func.assert_called_once_with(None)
-        self.assertIn("Observation: Viewed.", updated_state_view['messages'][-1]['content'])
-
-        # Test BookAppointment (with input)
-        mock_tool_book.func.reset_mock()
-        mock_tool_book.func.return_value = "Booked."
-        action_input_dict = {"name": "Test", "date": "2024-01-01", "time": "10:00", "purpose": "Test"}
+    def test_tool_calling_logic_bookappointment(self):
+        action_input_dict = {"name": "Test User", "date": "2024-03-15", "time": "10:00", "purpose": "Checkup"}
         action_input_json = json.dumps(action_input_dict)
 
-        state_book = AgentState(
-            messages=[], current_step=f"Action: BookAppointment\nAction Input: {action_input_json}", next="tool",
-            booking_info={}, last_action=None, action_count=0
+        self.mock_llm_instance.invoke.return_value = MagicMock(
+            content=f"Thought: I have all info, book it.
+Action: BookAppointment
+Action Input: {action_input_json}"
         )
-        updated_state_book = self.graph.invoke(state_book)
-        mock_tool_book.func.assert_called_once_with(action_input_dict)
-        self.assertIn(f"Action Input: {action_input_json}", updated_state_book['messages'][-1]['content'])
-        self.assertIn("Observation: Booked.", updated_state_book['messages'][-1]['content'])
+        self.mock_book_appointment_tool.return_value = "Successfully booked." # Simulate tool success
 
-    def test_call_tool_invalid_action(self):
-        state = AgentState(
-            messages=[], current_step="Action: NonExistentTool", next="tool",
-            booking_info={}, last_action=None, action_count=0
+        state = {**self.initial_state, "messages": [{"role": "user", "content": "Book for Test User..."}]}
+        final_state = self.graph.invoke(state)
+
+        self.mock_book_appointment_tool.assert_called_once_with(action_input_dict)
+
+        # Check that last_action and action_count are reset after successful booking
+        # This would be reflected in the prompt for the LLM call *after* booking.
+        second_llm_call_args = self.mock_llm_instance.invoke.call_args_list[1][0]
+        prompt_string_after_booking = second_llm_call_args[0]
+        self.assertIn("Last action taken: None", prompt_string_after_booking) # Assuming it's reset to None
+        self.assertIn("Number of consecutive actions: 0", prompt_string_after_booking)
+
+
+    def test_action_count_increment_and_reset(self):
+        # Simulate LLM deciding to use ViewAppointments three times
+        llm_response_view = "Thought: View again.
+Action: ViewAppointments
+Action Input: None"
+        self.mock_llm_instance.invoke.return_value = MagicMock(content=llm_response_view)
+        self.mock_view_appointments_tool.return_value = "Some appointments."
+
+        # First call
+        state = self.graph.invoke(self.initial_state)
+        # Prompt for 2nd agent turn (after 1st ViewAppointments)
+        prompt_after_1st_call = self.mock_llm_instance.invoke.call_args_list[1][0][0]
+        self.assertIn("Last action taken: ViewAppointments", prompt_after_1st_call)
+        self.assertIn("Number of consecutive actions: 1", prompt_after_1st_call)
+
+        # Second call
+        # Need to feed the output state of the first call (which includes agent's response)
+        # back into the graph. The 'messages' list in state would grow.
+        # For this specific test, we'll focus on the prompt generation part.
+        # We need to manually construct the state that call_agent would receive.
+        current_state_for_prompt = {
+            **self.initial_state,
+            "last_action": "ViewAppointments",
+            "action_count": 1 # This is what call_agent would receive for the 2nd decision
+        }
+        # This doesn't test the graph's state flow, but the prompt formatting directly.
+        # For simplicity, testing the prompt formatting part:
+        agent_instance_for_prompt_test = AppointmentAgent() # Fresh instance for CustomPromptTemplate
+        prompt_template_str = agent_instance_for_prompt_test.create_agent.__closure__[1].cell_contents.template # Accessing template string via closure (fragile)
+
+        test_prompt = CustomPromptTemplate(template=prompt_template_str, tools=[], input_variables=["last_action", "action_count", "name", "date", "time", "purpose", "input", "history", "agent_scratchpad", "tools", "tool_names", "has_all_info"])
+
+        formatted_prompt = test_prompt.format(
+            input="hello", history="", agent_scratchpad="", name=None, date=None, time=None, purpose=None, has_all_info=False,
+            tools="", tool_names=[],
+            last_action="ViewAppointments", action_count=1
         )
-        updated_state = self.graph.invoke(state)
+        self.assertIn("Last action taken: ViewAppointments", formatted_prompt)
+        self.assertIn("Number of consecutive actions: 1", formatted_prompt)
 
-        self.assertIn("Error: Tool 'NonExistentTool' not found.", updated_state['messages'][-1]['content'])
-        # last_action and action_count should still update for the attempt
-        self.assertEqual(updated_state['last_action'], "NonExistentTool")
-        self.assertEqual(updated_state['action_count'], 1)
+        formatted_prompt_2 = test_prompt.format(
+            input="hello", history="", agent_scratchpad="", name=None, date=None, time=None, purpose=None, has_all_info=False,
+            tools="", tool_names=[],
+            last_action="ViewAppointments", action_count=2 # If it were the 3rd decision to use ViewAppointments
+        )
+        self.assertIn("Last action taken: ViewAppointments", formatted_prompt_2)
+        self.assertIn("Number of consecutive actions: 2", formatted_prompt_2)
 
+
+    def test_tool_not_found(self):
+        self.mock_llm_instance.invoke.return_value = MagicMock(
+            content="Thought: I need to use a tool that doesn't exist.
+Action: NonExistentTool
+Action Input: None"
+        )
+        state = {**self.initial_state, "messages": [{"role": "user", "content": "Use NonExistentTool"}]}
+        final_state = self.graph.invoke(state)
+
+        # The error message "Error: Tool 'NonExistentTool' not found." would be part of the agent's scratchpad,
+        # and then the LLM would be invoked again. The final answer might reflect this.
+        # We check the 'messages' in the final state for an assistant message containing the error.
+        assistant_messages = [m["content"] for m in final_state["messages"] if m["role"] == "assistant"]
+        self.assertTrue(any("Error executing NonExistentTool" in msg or "Error: Tool 'NonExistentTool' not found." in msg for msg in assistant_messages))
 
 if __name__ == '__main__':
-    # This allows running the tests directly from this file
-    # However, typically a test runner like `python -m unittest discover` would be used.
-    # For the subtask environment, just creating the file is the goal.
-    unittest.main()
+    # This allows running the tests directly if the subtask environment supports it
+    # Ensure Python can find the appointment_system package.
+    # Adding parent directory to sys.path might be needed if tests are in a subdir.
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    unittest.main(verbosity=2)

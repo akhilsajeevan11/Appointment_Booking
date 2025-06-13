@@ -1,4 +1,4 @@
-from appointment_system.agent import AppointmentAgent
+from appointment_system.agent import AppointmentAgent, CS_INITIAL_GREETING
 
 def main():
     print("Welcome to the Appointment Booking System!")
@@ -18,7 +18,8 @@ def main():
             "purpose": None
         },
         "last_action": None,
-        "action_count": 0
+        "action_count": 0,
+        "conversation_state": CS_INITIAL_GREETING
     }
     
     while True:
