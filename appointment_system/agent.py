@@ -26,6 +26,7 @@ CS_COLLECTING_BOOKING_INFO = "COLLECTING_BOOKING_INFO"
 CS_CONFIRMING_BOOKING_INFO = "CONFIRMING_BOOKING_INFO"
 CS_VIEWING_APPOINTMENTS = "VIEWING_APPOINTMENTS"
 CS_PROVIDING_EXAMPLES = "PROVIDING_EXAMPLES"
+CS_AWAITING_RESPONSE_TO_OPTIONS = "AWAITING_RESPONSE_TO_OPTIONS"
 CS_CLARIFYING_INPUT = "CLARIFYING_INPUT"
 CS_HANDLING_TOOL_ERROR = "HANDLING_TOOL_ERROR"
 CS_POST_BOOKING_FEEDBACK = "POST_BOOKING_FEEDBACK"
@@ -87,8 +88,13 @@ class AppointmentAgent:
                 "Your goal is to be immediately helpful and engaging based on their initial statement."
             ),
             CS_GENERAL_INQUIRY: (
-                "You are in the GENERAL_INQUIRY state. The user's immediate need isn't a specific task, or they haven't clearly affirmed a direct offer you made. "
-                "Review the {history} carefully. "
+                "You are in the GENERAL_INQUIRY state. The user's immediate need isn't a specific task, or they haven't clearly affirmed a direct offer you made, or they've just responded to a set of options you provided. "
+                "Review the {history} carefully. Pay special attention to your last message to the user. "
+
+                "If your last message (from {history}) presented options or offered to explain something (e.g., 'explain X or book Y?', or 'I can explain Z'), "
+                "and the user's current input ({input}) seems to be choosing or referring to that offer (e.g., 'explain X', or just 'explain' if X was the clear topic for explanation), "
+                "then your Thought process should be: 'User is choosing/referring to an option I offered.' Then, proceed to fulfill that (e.g., provide the explanation). "
+                "This is important even if the state isn't CS_AWAITING_RESPONSE_TO_OPTIONS, to ensure user requests are understood in context. "
 
                 "If you just made a booking offer (e.g., 'Shall I book X for you?') and the user's response was NOT a clear 'yes' (leading here), "
                 "first try to understand their response. They might have a question, a hesitation, or want to modify something. Address that first. "
@@ -135,6 +141,15 @@ class AppointmentAgent:
             CS_PROVIDING_EXAMPLES: (
                 "You are in the PROVIDING_EXAMPLES state. The user asked for examples (e.g., of appointment purposes). "
                 "Use the GetPurposeExamples tool. Present the examples clearly. Ask if they find them helpful or want to proceed with booking."
+            ),
+            CS_AWAITING_RESPONSE_TO_OPTIONS: (
+                "You are in the AWAITING_RESPONSE_TO_OPTIONS state. "
+                "In your previous turn, you presented the user with specific choices or asked a question that expects a selection from options you provided (e.g., 'Would you like A or B?', 'Shall I explain X or Y?'). "
+                "The user's current message ({input}) is their response to those options. "
+                "Carefully analyze their response in the context of the options you presented (review {history}). "
+                "If their response clearly maps to one of the options (e.g., they say 'A', or 'explain X'), your Thought should be to proceed with that chosen action. "
+                "If their response is ambiguous, ask for clarification regarding the options you gave. Example: 'Sorry, I didn't quite catch that. Did you mean A or B?' "
+                "If they ask a completely new question or make an unrelated statement, you can address it, but then try to gently guide them back to making a choice if the original options are still relevant or ask if they'd like to abandon those options."
             ),
             CS_CLARIFYING_INPUT: (
                 "You are in the CLARIFYING_INPUT state. The user's last input was unclear, ambiguous, or too vague. "
@@ -190,7 +205,7 @@ class AppointmentAgent:
         Action Input: the input to the action (use JSON format for BookAppointment)
         Observation: the result of the action
         ... (this Thought/Action/Action Input/Observation can repeat N times)
-        Thought: I now know the final answer
+        Thought: I now know the final answer. If your Final Answer presents choices to the user (e.g., 'Do you want A or B?'), include in your Thought: 'I am presenting options, the user will now choose. Set next state to CS_AWAITING_RESPONSE_TO_OPTIONS.'
         Final Answer: the final answer to the original input question
         
         For booking appointments, use this JSON format:
@@ -217,6 +232,16 @@ class AppointmentAgent:
         14. Only use the BookAppointment tool when you have all required information (name, date, time, purpose).
         15. Always check the current booking information before asking for details.
         (Instruction 16 removed as per subtask)
+
+            LEARNING FROM TOOL OBSERVATIONS:
+            - When you receive an Observation after an Action, pay close attention to it.
+            - If the Observation indicates an error, a problem with your Action Input, or that the tool didn't behave as expected:
+                1. Re-read the description of the tool you just used from the available {tools} list.
+                2. Think about why it might have failed. Did you provide the wrong kind of input? Did you misunderstand what the tool does? Or did the tool itself encounter an issue?
+                3. If you believe you made a mistake in how you called the tool (e.g., wrong input format, or provided input to a no-input tool like GetPurposeExamples), your next Thought should be to try the tool again with the corrected invocation (e.g., with no Action Input if that was the error).
+                4. If the tool itself seems to have an internal error (e.g., 'database connection failed' from BookAppointment), or if you're unsure how to fix your tool call, DO NOT blindly repeat the same failed Action. Think about alternative tools or ways to help the user. You can also politely inform the user that you encountered a hiccup and ask them to rephrase or suggest a different approach. (The CS_HANDLING_TOOL_ERROR state will also guide you on user-facing messages).
+                5. Example: If a tool observation says "this tool takes no input" and you previously provided an Action Input, your next Thought should be "I see, that tool doesn't need input. I'll call it again correctly." then "Action: [ToolName]" (with no "Action Input:" line).
+
         17. NEVER use the same tool more than 3 times in a row.
         18. If you've used HandleGreeting twice in a row, provide a Final Answer instead.
         19. If you've used any tool 3 times in a row, provide a Final Answer to break the loop.
@@ -252,10 +277,10 @@ class AppointmentAgent:
 
         def should_continue(state: AgentState) -> str:
             logger.info(f"Current step: {state['current_step']}")
-            if "Final Answer" in state["current_step"]:
-                logger.info("Agent has reached final answer")
+            if "Action:" not in state["current_step"] or "Final Answer:" in state["current_step"]:
+                logger.info("Agent has reached Final Answer or a direct response.")
                 return "end"
-            logger.info("Agent needs to use a tool")
+            logger.info("Agent needs to use a tool.")
             return "tool"
 
         def call_agent(state: AgentState) -> AgentState:
@@ -325,36 +350,44 @@ class AppointmentAgent:
                         state["conversation_state"] = CS_GENERAL_INQUIRY
                         logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} for general/short input.")
 
-                elif current_conversation_state_for_prompt == CS_POST_BOOKING_FEEDBACK:
-                    logger.info(f"Processing user response ('{last_message}') in CS_POST_BOOKING_FEEDBACK.")
-                    if any(kw in last_message.lower() for kw in ["no", "nothing", "nope", "don't", "not now", "that's all", "that is all", "finished", "done", "bye"]):
-                        state["conversation_state"] = CS_ENDING_CONVERSATION
-                        logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} based on user response.")
-                    elif not last_message:
-                        state["conversation_state"] = CS_ENDING_CONVERSATION
-                        logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} due to empty input.")
-                    else:
-                        state["conversation_state"] = CS_GENERAL_INQUIRY
-                        logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_GENERAL_INQUIRY} to handle new/unclear request: {last_message}")
+            # This 'elif' block for CS_AWAITING_RESPONSE_TO_OPTIONS must be evaluated using current_conversation_state_for_prompt
+            # as it's a state that implies the *user* is responding to something the agent *just said*.
+            # The logic inside this block should primarily rely on the prompt segment for CS_AWAITING_RESPONSE_TO_OPTIONS
+            # to guide the LLM. The state for the *next* turn will be determined by the LLM's action or by subsequent logic.
+            elif current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS:
+                logger.info(f"In CS_AWAITING_RESPONSE_TO_OPTIONS, processing user choice: '{last_message}'. LLM will determine next specific task state.")
+                # No explicit state change for the *next* turn here;
+                # it will be set by the LLM's action (if a tool is called, call_tool sets state)
+                # or by the logic after the LLM call if it's a Final Answer.
+                pass
 
-                elif current_conversation_state_for_prompt == CS_ENDING_CONVERSATION:
-                    if last_message:
-                        state["conversation_state"] = CS_GENERAL_INQUIRY
-                        logger.info(f"User provided new input ('{last_message}') after conversation was ending. Transitioning from {CS_ENDING_CONVERSATION} to {CS_GENERAL_INQUIRY}.")
+            elif current_conversation_state_for_prompt == CS_POST_BOOKING_FEEDBACK:
+                logger.info(f"Processing user response ('{last_message}') in CS_POST_BOOKING_FEEDBACK.")
+                if any(kw in last_message.lower() for kw in ["no", "nothing", "nope", "don't", "not now", "that's all", "that is all", "finished", "done", "bye"]):
+                    state["conversation_state"] = CS_ENDING_CONVERSATION
+                    logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} based on user response.")
+                elif not last_message:
+                    state["conversation_state"] = CS_ENDING_CONVERSATION
+                    logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} due to empty input.")
+                else:
+                    state["conversation_state"] = CS_GENERAL_INQUIRY
+                    logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_GENERAL_INQUIRY} to handle new/unclear request: {last_message}")
+
+            elif current_conversation_state_for_prompt == CS_ENDING_CONVERSATION:
+                if last_message:
+                    state["conversation_state"] = CS_GENERAL_INQUIRY
+                    logger.info(f"User provided new input ('{last_message}') after conversation was ending. Transitioning from {CS_ENDING_CONVERSATION} to {CS_GENERAL_INQUIRY}.")
 
             if current_conversation_state_for_prompt in [CS_INITIAL_GREETING, CS_COLLECTING_BOOKING_INFO, CS_GENERAL_INQUIRY, CS_CONFIRMING_BOOKING_INFO] or \
                (made_booking_offer and user_affirmed):
                 if not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 2:
                     if state["booking_info"]["name"] is None : state["booking_info"]["name"] = last_message
-
                 date_match = re.search(r'\d{4}-\d{2}-\d{2}', last_message)
                 if date_match:
                     if state["booking_info"]["date"] is None : state["booking_info"]["date"] = date_match.group(0)
-
                 time_match = re.search(r'\d{2}:\d{2}', last_message.lower())
                 if time_match:
                     if state["booking_info"]["time"] is None : state["booking_info"]["time"] = time_match.group(0)
-
                 if len(last_message.split()) > 3 and not date_match and not time_match and \
                    state["booking_info"]["purpose"] is None and not (made_booking_offer and user_affirmed and potential_purpose_from_offer):
                     if current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO :
@@ -365,7 +398,6 @@ class AppointmentAgent:
             if current_conversation_state_for_prompt == CS_COLLECTING_BOOKING_INFO and has_all_info:
                 state["conversation_state"] = CS_CONFIRMING_BOOKING_INFO
                 logger.info(f"Transitioning state from {CS_COLLECTING_BOOKING_INFO} to {CS_CONFIRMING_BOOKING_INFO} as all info is collected.")
-
             elif current_conversation_state_for_prompt == CS_CONFIRMING_BOOKING_INFO:
                 if any(kw in last_message.lower() for kw in ["no", "change", "wrong", "don't", "alter", "modify"]):
                     state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
@@ -376,18 +408,35 @@ class AppointmentAgent:
                 input=messages[-1]["content"],
                 history="\n".join([m["content"] for m in messages[:-1]]),
                 agent_scratchpad="",
-                name=state["booking_info"]["name"],
-                date=state["booking_info"]["date"],
-                time=state["booking_info"]["time"],
-                purpose=state["booking_info"]["purpose"],
-                last_action=state["last_action"],
-                action_count=state["action_count"],
-                has_all_info=has_all_info,
+                name=state["booking_info"]["name"], date=state["booking_info"]["date"], time=state["booking_info"]["time"], purpose=state["booking_info"]["purpose"],
+                last_action=state["last_action"], action_count=state["action_count"], has_all_info=has_all_info,
                 current_conversation_state=current_conversation_state_for_prompt,
                 prompt_segments=self.prompt_segments
             ))
             logger.info(f"Agent response: {response.content}")
             state["current_step"] = response.content
+
+            # After LLM call, determine next state if LLM signaled it or if current state implies a default next state
+            # This is where state["conversation_state"] for the *next* turn is definitively set.
+
+            # Check if LLM signaled a specific next state
+            llm_signaled_next_state = False
+            thought_match = re.search(r"Thought:(.*?)Action:|Thought:(.*?)Final Answer:", response.content, re.DOTALL)
+            if thought_match:
+                thought_text = (thought_match.group(1) or thought_match.group(2) or "").strip().lower()
+                if "set next state to cs_awaiting_response_to_options" in thought_text:
+                    state["conversation_state"] = CS_AWAITING_RESPONSE_TO_OPTIONS
+                    logger.info(f"LLM signaled to set next state to {CS_AWAITING_RESPONSE_TO_OPTIONS}.")
+                    llm_signaled_next_state = True
+
+            # If LLM didn't signal a state, and current state was CS_AWAITING_RESPONSE_TO_OPTIONS,
+            # and no tool is called (Final Answer was given), then default to CS_GENERAL_INQUIRY.
+            if not llm_signaled_next_state and \
+               current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS and \
+               "Action:" not in response.content:
+                state["conversation_state"] = CS_GENERAL_INQUIRY
+                logger.info(f"After processing CS_AWAITING_RESPONSE_TO_OPTIONS with a Final Answer, transitioning next state to {CS_GENERAL_INQUIRY}.")
+
             return state
 
         def call_tool(state: AgentState) -> AgentState:
@@ -397,6 +446,8 @@ class AppointmentAgent:
             action_match = re.search(r"Action: (\w+)", current_step)
             action_input_match = re.search(r"Action Input: (.*?)(?=\n|$)", current_step)
             
+            no_input_tools = ["ViewAppointments", "HandleGreeting", "GetPurposeExamples"]
+
             if action_match:
                 action = action_match.group(1)
                 logger.info(f"Tool action: {action}")
@@ -419,7 +470,13 @@ class AppointmentAgent:
                     tool_input = None
                     action_input_str = ""
 
-                    if selected_tool.name == "BookAppointment":
+                    if selected_tool.name in no_input_tools:
+                        if action_input_match and action_input_match.group(1) and action_input_match.group(1).strip():
+                            actual_input_provided = action_input_match.group(1).strip()
+                            logger.warning(f"LLM attempted to provide input '{actual_input_provided}' for no-input tool '{selected_tool.name}'. Ignoring input.")
+                        tool_input = None
+                        action_input_str = ""
+                    elif selected_tool.name == "BookAppointment":
                         if action_input_match:
                             action_input_str = action_input_match.group(1).strip()
                             logger.info(f"BookAppointment raw input: {action_input_str}")
@@ -467,7 +524,7 @@ class AppointmentAgent:
                                 state["conversation_state"] = CS_GENERAL_INQUIRY
                                 logger.info(f"Transitioning state to {CS_GENERAL_INQUIRY} after {selected_tool.name}.")
 
-                            if action_input_str :
+                            if action_input_str:
                                 result_content = f"Action: {action}\nAction Input: {action_input_str}\nObservation: {result}"
                             else:
                                 result_content = f"Action: {action}\nObservation: {result}"
