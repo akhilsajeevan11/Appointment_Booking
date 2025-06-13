@@ -104,6 +104,13 @@ class AppointmentAgent:
                 "Be proactive. Offer to explain the booking process, or suggest showing examples of appointment purposes (consider GetPurposeExamples tool if they seem broadly unsure). "
                 "Example for a new user: 'Since you're new, I can quickly explain how booking works, or I can show you some example appointment reasons. What would be more helpful for you right now?' "
 
+                "SPECIAL CASE for name confirmation: If your last message asked the user to confirm a name stored in {booking_info[name]} AND to provide other details (like date/time), "
+                "AND the {booking_info[name]} looks like a placeholder phrase (e.g., contains 'new here', 'help', 'assist', 'process', or is longer than 4 words) rather than a real name, "
+                "AND the user's current input ({input}) is a general affirmation (e.g., 'yes', 'yeah', 'sure', 'okay'): "
+                "DO NOT assume the placeholder name is correct. Your Thought process should be: 'User affirmed, but the stored name is suspect. I need to get their actual name.' "
+                "Your Final Answer should then be a polite request for their name, like: 'Okay, great! To get started with your consultation booking, could you please tell me your name?' "
+                "Then, you should expect to transition to COLLECTING_BOOKING_INFO where the name will be gathered. If you can set the next state in your thought, set it to CS_COLLECTING_BOOKING_INFO."
+
                 "For other general inquiries, or if the user seems to be exploring options after declining a specific offer: "
                 "Listen carefully, politely ask clarifying questions to guide them towards a task you can perform (booking, viewing, examples). "
                 "Avoid immediately re-offering 'GetPurposeExamples' if they just sidestepped a specific booking offer, unless they explicitly ask for alternatives or seem lost. Focus on their last statement. "
@@ -332,6 +339,16 @@ class AppointmentAgent:
 
             if made_booking_offer and user_affirmed:
                 logger.info(f"User affirmed a previous booking offer. Last agent msg: '{agents_previous_content}', User input: '{last_message}'")
+
+                # Check if the currently stored name is suspect
+                current_name = state["booking_info"]["name"]
+                if current_name:
+                    suspect_keywords = ["new here", "help", "please", "process", "assist", "guide"]
+                    words_in_name = current_name.lower().split()
+                    if any(kw in words_in_name for kw in suspect_keywords) or len(words_in_name) > 4:
+                        logger.info(f"Suspect name '{current_name}' found after user affirmation. Clearing it to re-prompt.")
+                        state["booking_info"]["name"] = None # Clear suspect name
+
                 state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
                 current_conversation_state_for_prompt = CS_COLLECTING_BOOKING_INFO
                 if potential_purpose_from_offer and state["booking_info"]["purpose"] is None:
@@ -373,8 +390,35 @@ class AppointmentAgent:
 
             if current_conversation_state_for_prompt in [CS_INITIAL_GREETING, CS_COLLECTING_BOOKING_INFO, CS_GENERAL_INQUIRY, CS_CONFIRMING_BOOKING_INFO] or \
                (made_booking_offer and user_affirmed):
-                if not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 2:
-                    if state["booking_info"]["name"] is None : state["booking_info"]["name"] = last_message
+                # Attempt to extract name if not already set
+                if state["booking_info"]["name"] is None:
+                    # Avoid capturing long phrases, questions, or help requests as names
+                    words_in_message = last_message.lower().split()
+                    num_words = len(words_in_message)
+                    is_potential_name = True
+
+                    if num_words < 2 or num_words > 4: # Typical name length
+                        is_potential_name = False
+
+                    if any(kw in words_in_message for kw in ["help", "assist", "guide", "what", "how", "why", "can", "could", "show", "tell", "explain"]):
+                        is_potential_name = False
+
+                    if "?" in last_message:
+                        is_potential_name = False
+
+                    if not any(char.isalpha() for char in last_message): # Must contain some letters
+                        is_potential_name = False
+
+                    # Ensure it doesn't look like a date or time
+                    if re.search(r'\d{4}-\d{2}-\d{2}', last_message) or re.search(r'\d{2}:\d{2}', last_message):
+                        is_potential_name = False
+
+                    if is_potential_name and not any(char.isdigit() for char in last_message):
+                        logger.info(f"Potentially extracting name: {last_message}")
+                        state["booking_info"]["name"] = last_message
+                    else:
+                        logger.info(f"Skipping name extraction for: {last_message} based on new rules.")
+
                 date_match = re.search(r'\d{4}-\d{2}-\d{2}', last_message)
                 if date_match:
                     if state["booking_info"]["date"] is None : state["booking_info"]["date"] = date_match.group(0)

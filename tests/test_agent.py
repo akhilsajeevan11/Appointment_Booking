@@ -7,8 +7,8 @@ import os
 # Attempt to import from the project structure
 # This assumes 'appointment_system' is in the Python path or PYTHONPATH is set up
 try:
-    from appointment_system.agent import AppointmentAgent, AgentState, CustomPromptTemplate
-    from appointment_system.tools import AppointmentTools # For mocking its methods
+    from appointment_system.agent import AppointmentAgent, AgentState, CustomPromptTemplate, CS_GENERAL_INQUIRY, CS_COLLECTING_BOOKING_INFO
+    from appointment_system.tools import AppointmentTools
 except ImportError:
     # Fallback for environments where direct import might be tricky
     # Define minimal stubs if real classes can't be loaded by the subtask runner
@@ -23,6 +23,8 @@ except ImportError:
         def create_agent(self): return MagicMock() # Returns a mock graph
     class AppointmentTools: # Stub
         def get_tools(self): return []
+    CS_GENERAL_INQUIRY = "GENERAL_INQUIRY" # Add stubs
+    CS_COLLECTING_BOOKING_INFO = "COLLECTING_BOOKING_INFO" # Add stubs
 
 
 # It's important that the subtask can actually access and import these.
@@ -257,6 +259,65 @@ class TestAgentLogic(unittest.TestCase):
         # We check the 'messages' in the final state for an assistant message containing the error.
         assistant_messages = [m["content"] for m in final_state["messages"] if m["role"] == "assistant"]
         self.assertTrue(any("Error executing NonExistentTool" in msg or "Error: Tool 'NonExistentTool' not found." in msg for msg in assistant_messages))
+
+    def test_handle_misidentified_name_and_confirmation(self):
+        # --- Setup: Agent has previously misidentified name and asked for confirmation + details ---
+        # This simulates the conversation history leading up to the user saying "yeah sure".
+        initial_user_input_that_led_to_bad_name = "i am new here please help to process"
+        agent_previous_question_with_bad_name = "Okay, I understand you're new and need a consultation. First, is the name 'i am new here please help to process' correct? Also, please provide the date (YYYY-MM-DD) and time (HH:MM)?"
+
+        # Mock the LLM's response for when the input is "yeah sure" under these conditions.
+        # The agent's internal Python logic should have already cleared the suspect name
+        # and set the state to CS_COLLECTING_BOOKING_INFO before this LLM call.
+        # So, the LLM's task is to formulate a response based on a state where 'name' is None
+        # and the goal is to collect it.
+        self.mock_llm_instance.invoke.return_value = MagicMock(
+            content="Thought: The user affirmed, but the previously stored name was suspect and has been cleared by prior logic. The current state is CS_COLLECTING_BOOKING_INFO and name is missing. I must ask for the name now.\nFinal Answer: Okay, great! To get started, could you please tell me your name?"
+        )
+
+        # --- User says "yeah sure" ---
+        user_confirmation_input = "yeah sure"
+
+        # Define the state of the conversation just before processing "yeah sure".
+        # Crucially, `booking_info["name"]` contains the suspect phrase.
+        state_before_confirmation_processed = {
+            "messages": [
+                {"role": "user", "content": initial_user_input_that_led_to_bad_name},
+                {"role": "assistant", "content": agent_previous_question_with_bad_name},
+                {"role": "user", "content": user_confirmation_input}
+            ],
+            "booking_info": {"name": "i am new here please help to process", "date": None, "time": None, "purpose": "consultation"}, # Bad name is present here
+            "last_action": None,
+            "action_count": 0,
+            # When "yeah sure" is processed, the agent's `call_agent` function should:
+            # 1. Detect `user_affirmed` is true.
+            # 2. Check `made_booking_offer` (agent_previous_question_with_bad_name implies an offer to book).
+            # 3. Identify `booking_info.name` as suspect and clear it to None.
+            # 4. Set `current_conversation_state_for_prompt` to CS_COLLECTING_BOOKING_INFO.
+            # 5. Call the LLM with this updated state (name=None, state=CS_COLLECTING_BOOKING_INFO).
+            "conversation_state": CS_GENERAL_INQUIRY # Initial state before "yeah sure" is processed by call_agent
+        }
+
+        # Invoke the graph. The `call_agent` method will execute its Python logic,
+        # then call the mocked LLM.
+        final_agent_output_obj = self.graph.invoke(state_before_confirmation_processed)
+
+        # The agent's response content is taken from the mocked LLM's `content` field.
+        final_response_content = final_agent_output_obj['current_step']
+
+        # Assertions:
+        # 1. The mocked LLM was called exactly once during this invocation.
+        self.mock_llm_instance.invoke.assert_called_once()
+
+        # 2. The agent's final response (from the LLM) should be asking for the name.
+        self.assertIn("could you please tell me your name?", final_response_content)
+        # Ensure the bad name is not part of the agent's response.
+        self.assertNotIn("i am new here please help to process", final_response_content)
+
+        # 3. The `booking_info.name` in the final state returned by the graph should be None,
+        #    indicating it was cleared by the agent's internal logic.
+        self.assertIsNone(final_agent_output_obj['booking_info']['name'],
+                          "Booking_info.name should have been cleared by the agent's logic before calling the LLM.")
 
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
