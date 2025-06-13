@@ -432,6 +432,12 @@ class AppointmentAgent:
 
             # Date and Time Extraction using dateutil.parser
             if state["booking_info"]["date"] is None or state["booking_info"]["time"] is None:
+                contains_date_keyword = False
+                contains_day_pattern = False
+                contains_year_pattern = False
+                contains_time_keyword = False
+                contains_hour_pattern = False
+                # These flags will be set to True within the try block if relevant patterns are found.
                 try:
                     # Use fuzzy parsing to ignore irrelevant parts of the string.
                     # default to now() helps if only time is given (uses today's date)
@@ -491,22 +497,36 @@ class AppointmentAgent:
                 except Exception as e: # Catch any other unexpected errors during parsing
                     logger.error(f"Unexpected error during date/time parsing of '{last_message}': {e}")
 
-            # Purpose extraction (simplified, ensure it doesn't overwrite if already set and fuzzy matched a date/time)
-            if state["booking_info"]["purpose"] is None and \
-               not (made_booking_offer and user_affirmed and potential_purpose_from_offer) and \
-               len(last_message.split()) > 3: # Basic heuristic: purpose is likely longer
-                # Avoid using parts of message that were clearly identified as date/time for purpose
-                temp_purpose_message = last_message
-                if state["booking_info"]["date"] and state["booking_info"]["date"] in temp_purpose_message:
-                     temp_purpose_message = temp_purpose_message.replace(state["booking_info"]["date"], "").strip()
-                if state["booking_info"]["time"] and state["booking_info"]["time"] in temp_purpose_message:
-                     temp_purpose_message = temp_purpose_message.replace(state["booking_info"]["time"], "").strip()
+            # Determine if the message was primarily about date/time based on heuristics
+            message_was_mainly_datetime = (contains_date_keyword or
+                                           contains_day_pattern or
+                                           contains_year_pattern or
+                                           contains_time_keyword or
+                                           contains_hour_pattern)
 
-                if len(temp_purpose_message.split()) > 2 and current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO: # Check length again after stripping
-                    # Further check to ensure it's not just date/time related keywords
-                    if not (contains_date_keyword or contains_day_pattern or contains_year_pattern or contains_time_keyword or contains_hour_pattern and len(temp_purpose_message.split()) < 5) :
-                        state["booking_info"]["purpose"] = temp_purpose_message
-                        logger.info(f"Extracted purpose: {state['booking_info']['purpose']}")
+            # Conditions for setting purpose:
+            # 1. Purpose is not already set.
+            # 2. The message was not primarily identified as date/time.
+            # 3. The message has a reasonable length for a purpose (e.g., more than 1 word, or more than 3 if not specific).
+            # 4. We are not in a state where purpose should not be updated (e.g., CS_CONFIRMING_BOOKING_INFO).
+            # 5. It's not a leftover from a booking offer affirmation where purpose was pre-filled.
+
+            if state["booking_info"]["purpose"] is None and \
+               not message_was_mainly_datetime and \
+               len(last_message.split()) > 1 and \
+               current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO and \
+               not (made_booking_offer and user_affirmed and potential_purpose_from_offer):
+
+                # Further refine: avoid very short messages that might just be affirmations/negations if no other context
+                if len(last_message.split()) < 3 and last_message.lower() in ["yes", "no", "ok", "okay", "sure", "cancel"]:
+                    logger.info(f"Skipping purpose extraction for short affirmation/negation: '{last_message}'")
+                else:
+                    state["booking_info"]["purpose"] = last_message
+                    logger.info(f"Extracted purpose: {state['booking_info']['purpose']}")
+            elif not message_was_mainly_datetime and state["booking_info"]["purpose"] is not None :
+                 logger.info(f"Purpose already set to '{state['booking_info']['purpose']}', not overwriting with '{last_message}'.")
+            elif message_was_mainly_datetime:
+                 logger.info(f"Skipping purpose extraction for '{last_message}' as it was identified as mainly date/time.")
             
             has_all_info = all(state["booking_info"].values())
 
