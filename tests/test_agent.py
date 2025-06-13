@@ -247,6 +247,6 @@ Action Input: None"
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
     # Ensure Python can find the appointment_system package.
-    # Adding parent directory to sys.path might be needed if tests are in a subdir.
+
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     unittest.main(verbosity=2)
