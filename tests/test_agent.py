@@ -168,7 +168,7 @@ class TestAgentLogic(unittest.TestCase):
 
         self.mock_book_appointment_tool.assert_called_once_with(action_input_dict)
 
-        # Check that last_action and action_count are reset after successful booking
+
         # This would be reflected in the prompt for the LLM call *after* booking.
         second_llm_call_args = self.mock_llm_instance.invoke.call_args_list[1][0]
         prompt_string_after_booking = second_llm_call_args[0]
