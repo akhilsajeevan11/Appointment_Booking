@@ -337,21 +337,23 @@ class AppointmentAgent:
                 if potential_purpose_from_offer and state["booking_info"]["purpose"] is None:
                     state["booking_info"]["purpose"] = potential_purpose_from_offer
                     logger.info(f"Pre-filled purpose from offer: '{potential_purpose_from_offer}'")
-            elif current_conversation_state_for_prompt == CS_INITIAL_GREETING:
-                user_input_lower = last_message.lower()
-                if any(phrase in user_input_lower for phrase in ["new here", "am new", "help", "what can you do", "how does this work", "guide me", "get started"]):
-                    state["conversation_state"] = CS_GENERAL_INQUIRY
-                    logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to new user/help query.")
-                elif len(last_message) > 15 or any(kw in user_input_lower for kw in ["book", "appointment", "view", "schedule", "check"]):
-                    state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
-                    logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to specific intent.")
-                else:
-                    state["conversation_state"] = CS_GENERAL_INQUIRY
-                    logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} for general/short input.")
+            else:
+                if current_conversation_state_for_prompt == CS_INITIAL_GREETING:
+                    user_input_lower = last_message.lower()
+                    if any(phrase in user_input_lower for phrase in ["new here", "am new", "help", "what can you do", "how does this work", "guide me", "get started"]):
+                        state["conversation_state"] = CS_GENERAL_INQUIRY
+                        logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to new user/help query.")
+                    elif len(last_message) > 15 or any(kw in user_input_lower for kw in ["book", "appointment", "view", "schedule", "check"]):
+                        state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
+                        logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to specific intent.")
+                    else:
+                        state["conversation_state"] = CS_GENERAL_INQUIRY
+                        logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} for general/short input.")
+
             elif current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS:
                 logger.info(f"In CS_AWAITING_RESPONSE_TO_OPTIONS, processing user choice: '{last_message}'. LLM will determine next specific task state.")
-                # No explicit state change for the *next* turn here
                 pass
+
             elif current_conversation_state_for_prompt == CS_POST_BOOKING_FEEDBACK:
                 logger.info(f"Processing user response ('{last_message}') in CS_POST_BOOKING_FEEDBACK.")
                 if any(kw in last_message.lower() for kw in ["no", "nothing", "nope", "don't", "not now", "that's all", "that is all", "finished", "done", "bye"]):
@@ -363,6 +365,7 @@ class AppointmentAgent:
                 else:
                     state["conversation_state"] = CS_GENERAL_INQUIRY
                     logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_GENERAL_INQUIRY} to handle new/unclear request: {last_message}")
+
             elif current_conversation_state_for_prompt == CS_ENDING_CONVERSATION:
                 if last_message:
                     state["conversation_state"] = CS_GENERAL_INQUIRY
@@ -406,10 +409,6 @@ class AppointmentAgent:
             logger.info(f"Agent response: {response.content}")
             state["current_step"] = response.content
 
-            # After LLM call, determine next state if LLM signaled it or if current state implies a default next state
-            # This is where state["conversation_state"] for the *next* turn is definitively set.
-
-            # Check if LLM signaled a specific next state
             llm_signaled_next_state = False
             thought_match = re.search(r"Thought:(.*?)Action:|Thought:(.*?)Final Answer:", response.content, re.DOTALL)
             if thought_match:
@@ -419,8 +418,6 @@ class AppointmentAgent:
                     logger.info(f"LLM signaled to set next state to {CS_AWAITING_RESPONSE_TO_OPTIONS}.")
                     llm_signaled_next_state = True
 
-            # If LLM didn't signal a state, and current state was CS_AWAITING_RESPONSE_TO_OPTIONS,
-            # and no tool is called (Final Answer was given), then default to CS_GENERAL_INQUIRY.
             if not llm_signaled_next_state and \
                current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS and \
                "Action:" not in response.content:
@@ -550,4 +547,4 @@ class AppointmentAgent:
         
         return app
 
-
+[end of appointment_system/agent.py]
