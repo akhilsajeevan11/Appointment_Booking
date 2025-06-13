@@ -88,6 +88,7 @@ class AppointmentAgent:
                 "However, if the user says they are new, asks for help, or asks what you can do (e.g., 'i am new here', 'help me', 'what can you do?'), "
                 "DO NOT use HandleGreeting. Instead, formulate a direct, welcoming, and informative response. "
                 "For example: 'Hello! I'm an appointment booking assistant. I can help you schedule new appointments, view existing ones, or show you examples of common appointment purposes. What would you like to do today, or would you like a bit more detail on how I can help?' "
+                " Similarly, if the user's first message clearly states a direct booking intent (e.g., 'I want to book an appointment', 'schedule a meeting for my checkup'), treat this as a direct request to start the booking process. Your thought process should be to acknowledge this intent, set the {booking_info[purpose]} if a clear one is mentioned (like 'checkup'), and then move to gather the first piece of missing information (usually name), aiming for a transition to the CS_COLLECTING_BOOKING_INFO state. Do NOT use HandleGreeting in such cases of clear booking intent."
                 "Your goal is to be immediately helpful and engaging based on their initial statement."
             ),
             CS_GENERAL_INQUIRY: (
@@ -112,11 +113,14 @@ class AppointmentAgent:
                 "If you have previously suggested a specific appointment purpose based on user-provided details (e.g., 'Consultation for back pain' after user mentioned 'back pain'), and the user's current input is a continuation of that booking flow (e.g., providing their name), YOU MUST re-iterate this specific purpose in your thought process using 'Effective current purpose: [specific purpose previously discussed]'. Do not revert to 'None' or a more generic purpose if a specific one was contextually relevant."
 
                 "If the user previously indicated they are new or asked for general help (e.g., 'help me', 'i am new here'), and you haven't yet provided substantial guidance: "
-                "If their statement is very broad and indicates a complete lack of understanding (e.g., 'I don't know anything', 'what is this?'), "
+                "If their query involves a specific symptom or problem (e.g., 'I have back pain, what should I do?', 'my tooth aches'), your primary response should be to suggest a relevant appointment type (e.g., 'A consultation with a doctor could help with back pain.' or 'A dental check-up would be good for a toothache.'). After suggesting, directly offer to help book that specific type of appointment. For example: 'Would you like me to help you book a [suggested appointment type]?' Only use `GetPurposeExamples` if, after your direct suggestion, the user still expresses broad uncertainty about appointment types or asks for more examples."
+                "If their statement is very broad and indicates a complete lack of understanding (e.g., 'I don't know anything', 'what is this?'), " # This was part of the original block, keeping structure
                 "your first step should be to provide a concise overview of your main functions. For example: 'I'm an appointment booking assistant. I can help you schedule new appointments, check your existing ones, or show you examples of typical appointment reasons. To get started, you can tell me what you'd like to do, like saying 'book an appointment' or 'view my appointments'.' "
                 "After providing this overview, you can then ask what they'd like to do or if they need more details on any of those functions. "
                 "For less broad 'new user' queries, or if they respond to the overview by asking for more specific help, you can then offer to explain the booking process in detail, or show examples of appointment purposes (consider GetPurposeExamples tool if they seem broadly unsure of the *type* of appointment they need). "
                 "Example for a new user who seems to have some idea: 'Since you're new, I can quickly explain how booking works, or I can show you some example appointment reasons. What would be more helpful for you right now?' "
+
+                "HANDLING EXPLICIT BOOKING INTENT: If the user's current input ({input}) clearly states 'I want to book an appointment', 'I need to schedule something', or similar, and you are in this GENERAL_INQUIRY state: Your main goal is to transition to actual booking. If {booking_info[purpose]} is not yet set or is very generic (like 'i want to book an appointment' itself), try to elicit a more specific purpose if possible (e.g., 'Okay, I can help with that! What is the appointment for?'), or if the context implies a purpose, use that. Then, move to collect the first missing piece of information (usually name). Your thought process should aim to 'Set next state to CS_COLLECTING_BOOKING_INFO'. Avoid using `HandleGreeting` or `GetPurposeExamples` when a clear booking intent is expressed."
 
                 "SPECIAL CASE for name confirmation: If your last message asked the user to confirm a name stored in {booking_info[name]} AND to provide other details (like date/time), "
                 "AND the {booking_info[name]} looks like a placeholder phrase (e.g., contains 'new here', 'help', 'assist', 'process', or is longer than 4 words) rather than a real name, "
@@ -512,8 +516,65 @@ class AppointmentAgent:
                     # If the time parsed is not the default (midnight) OR the user explicitly mentioned time-like words
                     time_was_intended_by_user = time_is_different_from_default_time or user_likely_mentioned_time
 
+                    # Refined hour handling for "morning", "afternoon", "evening"
+                    if time_was_intended_by_user: # Use the existing heuristic flag
+                        temp_last_message_lower = last_message.lower()
+                        hour_to_set = -1 # Flag to indicate no change initially
+                        keyword_used_for_hour_adjustment = "" # For logging
 
-                    if time_was_intended_by_user: # Allow overwrite
+                        # Check for "noon"
+                        if 'noon' in temp_last_message_lower:
+                            hour_to_set = 12
+                            keyword_used_for_hour_adjustment = "noon"
+                        # Check for "midnight"
+                        elif 'midnight' in temp_last_message_lower:
+                            hour_to_set = 0
+                            keyword_used_for_hour_adjustment = "midnight"
+                        else:
+                            # Regex to find "[morning/afternoon/evening/night] [hour_number]" or "[hour_number] [in the morning/afternoon/...]"
+                            match = re.search(r'(morning|afternoon|evening|night)\s*(\d{1,2})|(\d{1,2})\s*(?:in\s*the\s*)?(morning|afternoon|evening|night)', temp_last_message_lower)
+                            if match:
+                                keyword = None
+                                hour_val_str = None
+                                if match.group(1) and match.group(2): # (keyword) (digits)
+                                    keyword = match.group(1)
+                                    hour_val_str = match.group(2)
+                                elif match.group(3) and match.group(4): # (digits) (keyword)
+                                    keyword = match.group(4)
+                                    hour_val_str = match.group(3)
+
+                                keyword_used_for_hour_adjustment = keyword if keyword else ""
+
+
+                                if keyword and hour_val_str:
+                                    try:
+                                        hour_num = int(hour_val_str)
+                                        if 0 <= hour_num <= 12: # Allow 0 for midnight cases, 12 for noon/pm
+                                            if keyword == 'afternoon':
+                                                if 1 <= hour_num <= 5: hour_to_set = hour_num + 12 # afternoon 1-5 -> 13-17
+                                                elif hour_num == 12: hour_to_set = 12 # afternoon 12 -> 12 (noon)
+                                            elif keyword == 'evening':
+                                                if 6 <= hour_num <= 9: hour_to_set = hour_num + 12 # evening 6-9 -> 18-21
+                                                elif 1 <= hour_num <= 5: hour_to_set = hour_num + 12 # evening 1-5 could also mean PM (e.g. 17:00)
+                                                elif hour_num == 12: hour_to_set = 12 # "evening 12" is likely noon
+                                            elif keyword == 'morning':
+                                                if 1 <= hour_num <= 11: hour_to_set = hour_num # morning 1-11 -> 1-11
+                                                elif hour_num == 12: hour_to_set = 0 # morning 12 (midnight)
+                                            elif keyword == 'night':
+                                                if 9 <= hour_num <= 11: hour_to_set = hour_num + 12 # night 9-11 -> 21-23
+                                                elif 1 <= hour_num <= 5: hour_to_set = hour_num # "1 at night" might be 1 AM
+                                                elif hour_num == 12: hour_to_set = 0 # night 12 (midnight)
+
+                                        elif 13 <= hour_num <= 23: # If user typed "afternoon 15", it's already 24h
+                                             hour_to_set = hour_num
+                                    except ValueError:
+                                        pass # Not a valid number
+
+                        if hour_to_set != -1 and parsed_dt.hour != hour_to_set :
+                            logger.info(f"Adjusting hour based on '{keyword_used_for_hour_adjustment}': from {parsed_dt.hour} to {hour_to_set}.")
+                            parsed_dt = parsed_dt.replace(hour=hour_to_set)
+
+                    if time_was_intended_by_user: # Allow overwrite (this outer if is from original logic)
                         # Heuristic to set minutes to 00 if "11am" style input and minutes are non-zero
                         if parsed_dt.minute != 0 and (re.search(r'\bam\b|\bpm\b', last_message, re.IGNORECASE)) and not (re.search(r'\d:\d{2}', last_message)):
                              logger.info(f"Time heuristic: Input '{last_message}', parsed time {parsed_dt.time()}. Contains am/pm and no colon. Resetting minutes to 00.")
@@ -583,12 +644,16 @@ class AppointmentAgent:
                     state["conversation_state"] = CS_COLLECTING_BOOKING_INFO # Ensure main state is also updated
 
             if current_conversation_state_for_prompt == CS_COLLECTING_BOOKING_INFO and has_all_info:
-                state["conversation_state"] = CS_CONFIRMING_BOOKING_INFO
-                logger.info(f"Transitioning state from {CS_COLLECTING_BOOKING_INFO} to {CS_CONFIRMING_BOOKING_INFO} as all info is collected.")
+                logger.info(f"All info collected while in {CS_COLLECTING_BOOKING_INFO}. Transitioning to CS_CONFIRMING_BOOKING_INFO for current LLM prompt.")
+                state["conversation_state"] = CS_CONFIRMING_BOOKING_INFO # Correctly sets the persistent state
+                current_conversation_state_for_prompt = CS_CONFIRMING_BOOKING_INFO # CRITICAL: Update for the current LLM call
             elif current_conversation_state_for_prompt == CS_CONFIRMING_BOOKING_INFO:
-                if any(kw in last_message.lower() for kw in ["no", "change", "wrong", "don't", "alter", "modify"]):
-                    state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
-                    logger.info(f"User wants to change booking info. Transitioning from {CS_CONFIRMING_BOOKING_INFO} to {CS_COLLECTING_BOOKING_INFO}.")
+                # This part handles the user's response (e.g., "no, change the date") to a confirmation prompt from a *previous* turn.
+                # The prompt for CS_CONFIRMING_BOOKING_INFO already tells LLM to set next state to CS_AWAITING_FINAL_CONFIRMATION.
+                # So, user's response to that prompt will be handled when current_conversation_state_for_prompt is CS_AWAITING_FINAL_CONFIRMATION.
+                # This elif block might be redundant or only hit if LLM fails to signal CS_AWAITING_FINAL_CONFIRMATION.
+                # For now, neutralizing its direct action to let CS_AWAITING_FINAL_CONFIRMATION prompt guide the LLM.
+                pass # Let CS_AWAITING_FINAL_CONFIRMATION handle user's response to confirmation query.
 
             logger.info(f"Conversational state for LLM prompt: {current_conversation_state_for_prompt}")
             response = self.llm.invoke(prompt.format(
