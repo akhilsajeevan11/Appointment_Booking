@@ -131,9 +131,7 @@ class TestAgentLogic(unittest.TestCase):
     def test_tool_calling_logic_viewappointments(self):
         # Simulate LLM output that asks to call ViewAppointments
         self.mock_llm_instance.invoke.return_value = MagicMock(
-            content="Thought: I need to view appointments.
-Action: ViewAppointments
-Action Input: None"
+            content="Thought: I need to view appointments.\nAction: ViewAppointments\nAction Input: None"
         )
 
         state = {**self.initial_state, "messages": [{"role": "user", "content": "View my appointments"}]}
@@ -161,9 +159,7 @@ Action Input: None"
         action_input_json = json.dumps(action_input_dict)
 
         self.mock_llm_instance.invoke.return_value = MagicMock(
-            content=f"Thought: I have all info, book it.
-Action: BookAppointment
-Action Input: {action_input_json}"
+            content=f"Thought: I have all info, book it.\nAction: BookAppointment\nAction Input: {action_input_json}"
         )
         self.mock_book_appointment_tool.return_value = "Successfully booked." # Simulate tool success
 
@@ -182,9 +178,7 @@ Action Input: {action_input_json}"
 
     def test_action_count_increment_and_reset(self):
         # Simulate LLM deciding to use ViewAppointments three times
-        llm_response_view = "Thought: View again.
-Action: ViewAppointments
-Action Input: None"
+        llm_response_view = "Thought: View again.\nAction: ViewAppointments\nAction Input: None"
         self.mock_llm_instance.invoke.return_value = MagicMock(content=llm_response_view)
         self.mock_view_appointments_tool.return_value = "Some appointments."
 
@@ -210,20 +204,42 @@ Action Input: None"
         agent_instance_for_prompt_test = AppointmentAgent() # Fresh instance for CustomPromptTemplate
         prompt_template_str = agent_instance_for_prompt_test.create_agent.__closure__[1].cell_contents.template # Accessing template string via closure (fragile)
 
-        test_prompt = CustomPromptTemplate(template=prompt_template_str, tools=[], input_variables=["last_action", "action_count", "name", "date", "time", "purpose", "input", "history", "agent_scratchpad", "tools", "tool_names", "has_all_info"])
+        test_prompt = CustomPromptTemplate(
+            template=prompt_template_str,
+            tools=[],
+            input_variables=["last_action", "action_count", "name", "date", "time", "purpose", "input", "history", "agent_scratchpad", "tools", "tool_names", "has_all_info"]
+        )
 
         formatted_prompt = test_prompt.format(
-            input="hello", history="", agent_scratchpad="", name=None, date=None, time=None, purpose=None, has_all_info=False,
-            tools="", tool_names=[],
-            last_action="ViewAppointments", action_count=1
+            input="hello",
+            history="",
+            agent_scratchpad="",
+            name=None,
+            date=None,
+            time=None,
+            purpose=None,
+            has_all_info=False,
+            tools="",
+            tool_names=[],
+            last_action="ViewAppointments",
+            action_count=1
         )
         self.assertIn("Last action taken: ViewAppointments", formatted_prompt)
         self.assertIn("Number of consecutive actions: 1", formatted_prompt)
 
         formatted_prompt_2 = test_prompt.format(
-            input="hello", history="", agent_scratchpad="", name=None, date=None, time=None, purpose=None, has_all_info=False,
-            tools="", tool_names=[],
-            last_action="ViewAppointments", action_count=2 # If it were the 3rd decision to use ViewAppointments
+            input="hello",
+            history="",
+            agent_scratchpad="",
+            name=None,
+            date=None,
+            time=None,
+            purpose=None,
+            has_all_info=False,
+            tools="",
+            tool_names=[],
+            last_action="ViewAppointments",
+            action_count=2 # If it were the 3rd decision to use ViewAppointments
         )
         self.assertIn("Last action taken: ViewAppointments", formatted_prompt_2)
         self.assertIn("Number of consecutive actions: 2", formatted_prompt_2)
@@ -231,9 +247,7 @@ Action Input: None"
 
     def test_tool_not_found(self):
         self.mock_llm_instance.invoke.return_value = MagicMock(
-            content="Thought: I need to use a tool that doesn't exist.
-Action: NonExistentTool
-Action Input: None"
+            content="Thought: I need to use a tool that doesn't exist.\nAction: NonExistentTool\nAction Input: None"
         )
         state = {**self.initial_state, "messages": [{"role": "user", "content": "Use NonExistentTool"}]}
         final_state = self.graph.invoke(state)
