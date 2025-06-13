@@ -127,9 +127,12 @@ class AppointmentAgent:
             ),
             CS_POST_BOOKING_FEEDBACK: (
                 "You are in the POST_BOOKING_FEEDBACK state. An appointment was just successfully booked. "
-                "Congratulate the user or confirm the success. "
-                "Ask if there's anything else you can assist them with. "
-                "Example: 'Great, your appointment is all set! Is there anything else I can help you with today?'"
+                "You have already informed the user of the successful booking and asked if they need anything else. "
+                "Now, you are processing their response to that question. "
+                "If the user indicates they need nothing further (e.g., 'no', 'no thanks', 'that's all'), your thought process should be to end the conversation. Formulate a polite closing statement. "
+                "If the user asks for something new or provides other input, your thought process should be to assess this new request and transition to a general inquiry or collecting information state. "
+                "Example user says 'no': Thought: User needs nothing else. I should say goodbye. Final Answer: You're welcome! Have a great day. "
+                "Example user says 'actually, can you view my appointments?': Thought: User has a new request. I should use the ViewAppointments tool. Action: ViewAppointments..."
             ),
             CS_ENDING_CONVERSATION: (
                 "You are in the ENDING_CONVERSATION state. The user has indicated they want to end the chat (e.g., 'exit', 'bye') or the task is fully complete. "
@@ -237,50 +240,75 @@ class AppointmentAgent:
             messages = state["messages"]
             logger.info(f"Processing message: {messages[-1]['content']}")
             
-            last_message = messages[-1]["content"]
-            current_conversation_state = state.get("conversation_state", CS_INITIAL_GREETING)
-            logger.info(f"Current conversational state (start of call_agent): {current_conversation_state}")
+            last_message = messages[-1]["content"].strip() # Ensure leading/trailing whitespace is removed
 
-            # State transition logic
-            if current_conversation_state == CS_INITIAL_GREETING:
+            # Retrieve current_conversation_state for this turn's logic and prompt
+            # This is the state determined by the PREVIOUS turn (or initialization).
+            current_conversation_state_for_prompt = state.get("conversation_state", CS_INITIAL_GREETING)
+            logger.info(f"Current conversational state (start of call_agent): {current_conversation_state_for_prompt}")
+
+            # State transition logic based on current state and user input
+            # The state["conversation_state"] set here will be for the *next* turn.
+            # The current_conversation_state_for_prompt is for *this* turn's LLM guidance.
+            if current_conversation_state_for_prompt == CS_INITIAL_GREETING:
                 if len(last_message) > 10 or any(kw in last_message.lower() for kw in ["book", "appointment", "view", "schedule"]):
                     state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
                     logger.info(f"Transitioning state from {CS_INITIAL_GREETING} to {CS_COLLECTING_BOOKING_INFO}")
                 else:
                     state["conversation_state"] = CS_GENERAL_INQUIRY
                     logger.info(f"Transitioning state from {CS_INITIAL_GREETING} to {CS_GENERAL_INQUIRY}")
-                current_conversation_state = state["conversation_state"] # Update for prompt formatting this turn
 
-            # Booking info extraction (remains the same)
-            if not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 2:
-                state["booking_info"]["name"] = last_message
-            date_match = re.search(r'\d{4}-\d{2}-\d{2}', last_message)
-            if date_match:
-                state["booking_info"]["date"] = date_match.group(0)
-            time_match = re.search(r'\d{2}:\d{2}', last_message.lower())
-            if time_match:
-                state["booking_info"]["time"] = time_match.group(0)
-            if len(last_message.split()) > 3 and not date_match and not time_match:
-                state["booking_info"]["purpose"] = last_message
+            elif current_conversation_state_for_prompt == CS_POST_BOOKING_FEEDBACK:
+                logger.info(f"Processing user response ('{last_message}') in CS_POST_BOOKING_FEEDBACK.")
+                if any(kw in last_message.lower() for kw in ["no", "nothing", "nope", "don't", "not now", "that's all", "that is all", "finished", "done", "bye"]):
+                    state["conversation_state"] = CS_ENDING_CONVERSATION
+                    logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} based on user response.")
+                elif not last_message: # User just hit enter, might mean they are done.
+                    state["conversation_state"] = CS_ENDING_CONVERSATION
+                    logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} due to empty input.")
+                else:
+                    state["conversation_state"] = CS_GENERAL_INQUIRY
+                    logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_GENERAL_INQUIRY} to handle new/unclear request: {last_message}")
+
+            elif current_conversation_state_for_prompt == CS_ENDING_CONVERSATION:
+                if last_message: # User provided new input after conversation was thought to be ending
+                    state["conversation_state"] = CS_GENERAL_INQUIRY
+                    logger.info(f"User provided new input ('{last_message}') after conversation was ending. Transitioning from {CS_ENDING_CONVERSATION} to {CS_GENERAL_INQUIRY}.")
+                # If no new message, it remains CS_ENDING_CONVERSATION, LLM will give final goodbye.
+
+            # Booking info extraction - should ideally only happen in relevant states
+            if current_conversation_state_for_prompt in [CS_INITIAL_GREETING, CS_COLLECTING_BOOKING_INFO, CS_GENERAL_INQUIRY, CS_CONFIRMING_BOOKING_INFO]:
+                if not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 2: # Basic name heuristic
+                    if state["booking_info"]["name"] is None : state["booking_info"]["name"] = last_message # Only fill if not already set by a specific question
+
+                date_match = re.search(r'\d{4}-\d{2}-\d{2}', last_message)
+                if date_match:
+                    if state["booking_info"]["date"] is None : state["booking_info"]["date"] = date_match.group(0)
+
+                time_match = re.search(r'\d{2}:\d{2}', last_message.lower())
+                if time_match:
+                    if state["booking_info"]["time"] is None : state["booking_info"]["time"] = time_match.group(0)
+
+                # Basic purpose heuristic - might need refinement or specific questions
+                if len(last_message.split()) > 3 and not date_match and not time_match and state["booking_info"]["purpose"] is None:
+                    # Avoid overwriting purpose if it was just confirmed or being collected specifically
+                    if current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO :
+                         state["booking_info"]["purpose"] = last_message
             
             has_all_info = all(state["booking_info"].values())
 
-            # State transition based on collected info
-            if current_conversation_state == CS_COLLECTING_BOOKING_INFO and has_all_info:
+            # Further state transitions based on new information or state (for next turn)
+            if current_conversation_state_for_prompt == CS_COLLECTING_BOOKING_INFO and has_all_info:
                 state["conversation_state"] = CS_CONFIRMING_BOOKING_INFO
                 logger.info(f"Transitioning state from {CS_COLLECTING_BOOKING_INFO} to {CS_CONFIRMING_BOOKING_INFO} as all info is collected.")
-                current_conversation_state = state["conversation_state"] # Update for prompt formatting
-            
-            elif current_conversation_state == CS_CONFIRMING_BOOKING_INFO:
+
+            elif current_conversation_state_for_prompt == CS_CONFIRMING_BOOKING_INFO:
                 if any(kw in last_message.lower() for kw in ["no", "change", "wrong", "don't", "alter", "modify"]):
                     state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
-                    # Potentially clear parts of booking_info here or let LLM guide
                     logger.info(f"User wants to change booking info. Transitioning from {CS_CONFIRMING_BOOKING_INFO} to {CS_COLLECTING_BOOKING_INFO}.")
-                    current_conversation_state = state["conversation_state"] # Update for prompt formatting
-                # If user confirms (e.g. "yes", "correct"), LLM (guided by CS_CONFIRMING_BOOKING_INFO prompt) should use BookAppointment.
-                # Transition to CS_POST_BOOKING_FEEDBACK or CS_HANDLING_TOOL_ERROR will happen in call_tool.
 
-            logger.info(f"Conversational state for LLM prompt: {current_conversation_state}")
+            # The current_conversation_state_for_prompt is what the LLM uses THIS turn for its prompt segment.
+            logger.info(f"Conversational state for LLM prompt: {current_conversation_state_for_prompt}")
             response = self.llm.invoke(prompt.format(
                 input=messages[-1]["content"],
                 history="\n".join([m["content"] for m in messages[:-1]]),
@@ -292,7 +320,7 @@ class AppointmentAgent:
                 last_action=state["last_action"],
                 action_count=state["action_count"],
                 has_all_info=has_all_info,
-                current_conversation_state=current_conversation_state,
+                current_conversation_state=current_conversation_state_for_prompt,
                 prompt_segments=self.prompt_segments
             ))
             logger.info(f"Agent response: {response.content}")
@@ -319,7 +347,7 @@ class AppointmentAgent:
                 if state["action_count"] >= 3:
                     logger.info("Too many consecutive actions, forcing final answer")
                     state["current_step"] = f"Thought: I've used the same tool too many times. I should provide a final answer.\nFinal Answer: I apologize for the confusion. Let me help you with that directly. What would you like to do?"
-                    state["conversation_state"] = CS_GENERAL_INQUIRY # Reset state on loop break
+                    state["conversation_state"] = CS_GENERAL_INQUIRY
                     return state
                 
                 result_content = ""
@@ -344,31 +372,32 @@ class AppointmentAgent:
                             else:
                                 tool_input = action_input_str
                                 logger.warning(f"BookAppointment input is not JSON: {action_input_str}")
-                                # Potentially set to CS_HANDLING_TOOL_ERROR or CS_CLARIFYING_INPUT if strict JSON is required by tool
+                                # Consider this an error for BookAppointment as it expects JSON
+                                result_content = f"Error: Expected JSON input for BookAppointment but received: {action_input_str}"
+                                state["conversation_state"] = CS_HANDLING_TOOL_ERROR
+                                logger.info(f"Transitioning state to {CS_HANDLING_TOOL_ERROR} due to non-JSON input for BookAppointment.")
                         else:
                             logger.error("Error: Missing input for BookAppointment.")
                             result_content = "Error: Missing Action Input for BookAppointment."
                             state["conversation_state"] = CS_HANDLING_TOOL_ERROR
                             logger.info(f"Transitioning state to {CS_HANDLING_TOOL_ERROR} due to missing input for BookAppointment.")
 
-                    if not result_content: # If no parsing error or missing input for BookAppointment
+                    if not result_content:
                         try:
                             logger.info(f"Executing {selected_tool.name} tool with input: {tool_input}")
                             result = selected_tool.func(tool_input)
                             logger.info(f"Tool result: {result}")
 
-                            # State transitions based on tool and result
                             if selected_tool.name == "BookAppointment":
                                 if "error" in result.lower() or "failed" in result.lower():
                                     state["conversation_state"] = CS_HANDLING_TOOL_ERROR
                                     logger.info(f"Transitioning state to {CS_HANDLING_TOOL_ERROR} due to BookAppointment operational error: {result}")
                                 elif "successfully booked" in result.lower():
                                     state["booking_info"] = {"name": None, "date": None, "time": None, "purpose": None}
-                                    state["last_action"] = None # Reset action tracking post-success
+                                    state["last_action"] = None
                                     state["action_count"] = 0
                                     state["conversation_state"] = CS_POST_BOOKING_FEEDBACK
                                     logger.info(f"Transitioning state to {CS_POST_BOOKING_FEEDBACK} after successful booking.")
-                                # Else, if BookAppointment returns something neutral, state might not change here explicitly
                             elif selected_tool.name == "HandleGreeting":
                                 state["conversation_state"] = CS_GENERAL_INQUIRY
                                 logger.info(f"Transitioning state to {CS_GENERAL_INQUIRY} after HandleGreeting.")
@@ -383,12 +412,12 @@ class AppointmentAgent:
 
                         except Exception as e:
                             logger.error(f"Tool execution error for {selected_tool.name}: {e}")
-                            result_content = f"Error executing {action}: {str(e)}" # For agent's observation
+                            result_content = f"Error executing {action}: {str(e)}"
                             state["conversation_state"] = CS_HANDLING_TOOL_ERROR
                             logger.info(f"Transitioning state to {CS_HANDLING_TOOL_ERROR} due to tool execution exception.")
                 else:
                     logger.error(f"Error: Tool '{action}' not found.")
-                    result_content = f"Error: Tool '{action}' not found." # For agent's observation
+                    result_content = f"Error: Tool '{action}' not found."
                     state["conversation_state"] = CS_HANDLING_TOOL_ERROR
                     logger.info(f"Transitioning state to {CS_HANDLING_TOOL_ERROR} due to tool not found.")
 
