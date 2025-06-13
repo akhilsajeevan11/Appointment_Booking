@@ -7,14 +7,16 @@ import os
 # Attempt to import from the project structure
 # This assumes 'appointment_system' is in the Python path or PYTHONPATH is set up
 from datetime import datetime as dt, date as test_date, time as test_time, timedelta # Use 'dt' to avoid conflict
+import json # Added for json.dumps in confirmation flow test
 try:
-    from appointment_system.agent import AppointmentAgent, AgentState, CustomPromptTemplate, CS_GENERAL_INQUIRY, CS_COLLECTING_BOOKING_INFO, CS_INITIAL_GREETING # Added CS_INITIAL_GREETING
+    from appointment_system.agent import (
+        AppointmentAgent, AgentState, CustomPromptTemplate,
+        CS_GENERAL_INQUIRY, CS_COLLECTING_BOOKING_INFO, CS_INITIAL_GREETING,
+        CS_CONFIRMING_BOOKING_INFO, CS_AWAITING_FINAL_CONFIRMATION # New states
+    )
     from appointment_system.tools import AppointmentTools
 except ImportError:
     # Fallback for environments where direct import might be tricky
-    CS_INITIAL_GREETING = "INITIAL_GREETING" # Add stub for CS_INITIAL_GREETING
-    # Define minimal stubs if real classes can't be loaded by the subtask runner
-    # This is less ideal as it doesn't test the actual classes directly
     print("Warning: Could not import full agent classes, using stubs for testing where necessary.")
     class AgentState(dict): pass
     class CustomPromptTemplate:
@@ -25,8 +27,11 @@ except ImportError:
         def create_agent(self): return MagicMock() # Returns a mock graph
     class AppointmentTools: # Stub
         def get_tools(self): return []
-    CS_GENERAL_INQUIRY = "GENERAL_INQUIRY" # Add stubs
-    CS_COLLECTING_BOOKING_INFO = "COLLECTING_BOOKING_INFO" # Add stubs
+    CS_INITIAL_GREETING = "INITIAL_GREETING"
+    CS_GENERAL_INQUIRY = "GENERAL_INQUIRY"
+    CS_COLLECTING_BOOKING_INFO = "COLLECTING_BOOKING_INFO"
+    CS_CONFIRMING_BOOKING_INFO = "CONFIRMING_BOOKING_INFO" # New stub
+    CS_AWAITING_FINAL_CONFIRMATION = "AWAITING_FINAL_CONFIRMATION" # New stub
 
 
 # It's important that the subtask can actually access and import these.
@@ -428,6 +433,145 @@ class TestAgentLogic(unittest.TestCase):
         #    the state in final_agent_output_obj['conversation_state'] should be CS_GENERAL_INQUIRY.
         self.assertEqual(final_agent_output_obj['conversation_state'], CS_GENERAL_INQUIRY,
                          "The conversation state after the LLM response should be CS_GENERAL_INQUIRY as no further transition was signaled.")
+
+    def test_extract_time_am_pm_정확히_on_the_hour(self): # Using Korean for unique name
+        mock_now = dt(2024, 7, 15, 10, 31) # Current time has non-zero minutes
+        user_input = "How about 11am?"
+        # Expected: time should be 11:00 due to heuristic, date should be None (if not intended)
+        expected_changes = {"time": "11:00"}
+        final_info = self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+        self.assertIsNone(final_info.get("date"), "Date should not be set if only '11am' is mentioned.")
+
+    def test_purpose_update_from_generic_to_specific(self):
+        initial_generic_purpose = "user needs help"
+        user_clarifies_symptoms = "actually i have a bad headache"
+        agent_suggests_specific = "Perhaps a 'Consultation' for your headache?" # Part of LLM1 output
+        user_confirms_specific = "yes, consultation sounds right"
+
+        # LLM Responses:
+        # 1. After user clarifies symptoms (LLM suggests specific purpose)
+        llm_response_1_content = f"Thought: User has a headache. Suggest 'Consultation'. Effective current purpose: Consultation.\nFinal Answer: {agent_suggests_specific}"
+        # 2. After user confirms specific purpose (LLM acknowledges and asks next q, e.g., name)
+        llm_response_2_content = "Thought: User confirmed 'Consultation'. Name is missing. Set next state to CS_COLLECTING_BOOKING_INFO. Effective current purpose: Consultation.\nFinal Answer: Okay, a 'Consultation' it is. What's your name?"
+
+        self.mock_llm_instance.invoke.side_effect = [
+            MagicMock(content=llm_response_1_content),
+            MagicMock(content=llm_response_2_content)
+        ]
+
+        # Initial state: generic purpose already set somehow
+        state_v1 = {
+            "messages": [{"role": "user", "content": user_clarifies_symptoms}],
+            "booking_info": {"name": None, "date": None, "time": None, "purpose": initial_generic_purpose},
+            "conversation_state": CS_GENERAL_INQUIRY, # Assuming this state allows purpose refinement via LLM
+            "last_action": None, "action_count": 0,
+        }
+        intermediate_state = self.graph.invoke(state_v1)
+        # Assert that after LLM1, purpose in booking_info is "Consultation"
+        self.assertEqual(intermediate_state['booking_info']['purpose'], "Consultation", "Purpose should be updated by LLM signal 1")
+
+        # Ensure the LLM mock is reset for the next call if not using side_effect for all calls in a test
+        # self.mock_llm_instance.reset_mock() # Not needed here due to fresh side_effect
+
+        state_v2 = {
+            "messages": [
+                {"role": "user", "content": user_clarifies_symptoms},
+                {"role": "assistant", "content": agent_suggests_specific}, # from llm_response_1
+                {"role": "user", "content": user_confirms_specific}
+            ],
+            "booking_info": intermediate_state['booking_info'], # Carry over booking_info
+            "conversation_state": CS_GENERAL_INQUIRY, # Or whatever state LLM1 led to, assume general for now
+            "last_action": None, "action_count": 0,
+        }
+        final_state = self.graph.invoke(state_v2)
+        # Assert that after LLM2, purpose is still "Consultation" and agent asks for name
+        self.assertEqual(final_state['booking_info']['purpose'], "Consultation", "Purpose should remain updated")
+        self.assertIn("What's your name?", final_state['current_step'])
+        self.assertEqual(final_state['conversation_state'], CS_COLLECTING_BOOKING_INFO)
+
+
+    def test_confirmation_flow_user_confirms_yes(self):
+        # State: All info collected, agent is about to ask for confirmation
+        all_info = {"name": "Test User", "date": "2024-09-15", "time": "14:00", "purpose": "Checkup"}
+        state_before_confirm_prompt = {
+            "messages": [{"role": "user", "content": "some prior message that led to all info"}],
+            "booking_info": all_info,
+            # "has_all_info": True, # Agent recalculates this
+            "last_action": None, "action_count": 0,
+            "conversation_state": CS_COLLECTING_BOOKING_INFO
+        }
+
+        # LLM Responses:
+        # 1. Agent asks for confirmation (in CS_CONFIRMING_BOOKING_INFO)
+        confirm_prompt_text = f"So, I have an appointment for {all_info['name']} on {all_info['date']} at {all_info['time']} for {all_info['purpose']}. Is that all correct?"
+        llm_asks_confirmation = MagicMock(content=f"Thought: All info present. Ask for confirmation. Set next state to CS_AWAITING_FINAL_CONFIRMATION.\nFinal Answer: {confirm_prompt_text}")
+
+        # 2. User says "yes", agent calls BookAppointment (in CS_AWAITING_FINAL_CONFIRMATION)
+        self.mock_book_appointment_tool.return_value = "Appointment booked successfully!"
+        llm_calls_bookappointment = MagicMock(content=f"Thought: User confirmed. Book it. Effective current purpose: {all_info['purpose']}.\nAction: BookAppointment\nAction Input: {json.dumps(all_info)}")
+
+        self.mock_llm_instance.invoke.side_effect = [llm_asks_confirmation, llm_calls_bookappointment]
+
+        # First invocation: Agent asks for confirmation
+        state_after_confirm_prompt = self.graph.invoke(state_before_confirm_prompt)
+        self.assertIn(confirm_prompt_text, state_after_confirm_prompt['current_step'])
+        self.assertEqual(state_after_confirm_prompt['conversation_state'], CS_AWAITING_FINAL_CONFIRMATION)
+
+        # Second invocation: User confirms "yes"
+        state_after_user_yes = {
+            "messages": state_after_confirm_prompt['messages'] + [{"role": "user", "content": "yes, that's correct"}],
+            "booking_info": all_info,
+            "last_action": None, "action_count": 0, # Reset for this new user turn
+            "conversation_state": CS_AWAITING_FINAL_CONFIRMATION
+        }
+        final_state = self.graph.invoke(state_after_user_yes)
+        self.mock_book_appointment_tool.assert_called_once_with(all_info)
+
+        # Check messages for tool output being included before next LLM call (if any)
+        # The current graph structure: agent -> tool -> agent. So after BookAppointment, LLM is called again.
+        # The "Appointment booked successfully!" would be an observation.
+        # The final_state['current_step'] would be the LLM's response *after* the booking.
+        # We need to check that the booking tool's result is in the message history.
+        assistant_messages_after_booking = [m['content'] for m in final_state['messages'] if m['role'] == 'assistant']
+        self.assertTrue(any("Observation: Appointment booked successfully!" in msg for msg in assistant_messages_after_booking),
+                        "Tool observation for successful booking not found in assistant messages.")
+
+
+    def test_confirmation_flow_user_says_no(self):
+        all_info = {"name": "Test User", "date": "2024-09-15", "time": "14:00", "purpose": "Checkup"}
+        state_before_confirm_prompt = {
+            "messages": [{"role": "user", "content": "some prior message"}],
+            "booking_info": all_info,
+            "last_action": None, "action_count": 0,
+            "conversation_state": CS_COLLECTING_BOOKING_INFO
+        }
+
+        # LLM Responses:
+        # 1. Agent asks for confirmation
+        confirm_prompt_text = f"So, I have an appointment for {all_info['name']} on {all_info['date']} at {all_info['time']} for {all_info['purpose']}. Is that all correct?"
+        llm_asks_confirmation = MagicMock(content=f"Thought: Ask for confirmation. Set next state to CS_AWAITING_FINAL_CONFIRMATION.\nFinal Answer: {confirm_prompt_text}")
+
+        # 2. User says "no", agent asks what to change (in CS_AWAITING_FINAL_CONFIRMATION)
+        llm_asks_what_to_change = MagicMock(content="Thought: User wants to change. Ask what. Set next state to CS_COLLECTING_BOOKING_INFO.\nFinal Answer: Okay, what information isn't correct or what would you like to change?")
+
+        self.mock_llm_instance.invoke.side_effect = [llm_asks_confirmation, llm_asks_what_to_change]
+
+        # First invocation: Agent asks for confirmation
+        state_after_confirm_prompt = self.graph.invoke(state_before_confirm_prompt)
+        self.assertEqual(state_after_confirm_prompt['conversation_state'], CS_AWAITING_FINAL_CONFIRMATION)
+
+        # Second invocation: User says "no"
+        state_after_user_no = {
+            "messages": state_after_confirm_prompt['messages'] + [{"role": "user", "content": "no, the time is wrong"}],
+            "booking_info": all_info,
+            "last_action": None, "action_count": 0,
+            "conversation_state": CS_AWAITING_FINAL_CONFIRMATION
+        }
+        final_state = self.graph.invoke(state_after_user_no)
+
+        self.assertIn("what information isn't correct", final_state['current_step'])
+        self.assertEqual(final_state['conversation_state'], CS_COLLECTING_BOOKING_INFO)
+        self.mock_book_appointment_tool.assert_not_called()
 
     # Helper method to set up state and mock LLM for date/time tests
     def _run_datetime_extraction_test(self, user_input, mock_current_datetime, expected_booking_info_changes):

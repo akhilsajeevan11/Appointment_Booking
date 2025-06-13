@@ -33,6 +33,7 @@ CS_CLARIFYING_INPUT = "CLARIFYING_INPUT"
 CS_HANDLING_TOOL_ERROR = "HANDLING_TOOL_ERROR"
 CS_POST_BOOKING_FEEDBACK = "POST_BOOKING_FEEDBACK"
 CS_ENDING_CONVERSATION = "ENDING_CONVERSATION"
+CS_AWAITING_FINAL_CONFIRMATION = "AWAITING_FINAL_CONFIRMATION"
 
 class AgentState(TypedDict):
     messages: List[Dict[str, Any]]
@@ -146,10 +147,22 @@ class AppointmentAgent:
                 "Your goal is to fill all fields in {booking_info}: name, date, time, and purpose."
             ),
             CS_CONFIRMING_BOOKING_INFO: (
-                "You are in the CONFIRMING_BOOKING_INFO state. You should have all details: {booking_info[name]}, {booking_info[date]}, {booking_info[time]}, {booking_info[purpose]}. "
-                "Clearly list all these details back to the user and ask for their explicit confirmation (e.g., 'yes' or 'correct') before using the BookAppointment tool. "
+                "You are in the CONFIRMING_BOOKING_INFO state. You have all details: {booking_info[name]} on {booking_info[date]} at {booking_info[time]} for {booking_info[purpose]}. "
+                "Your task is to clearly list ALL these details back to the user and ask for their explicit confirmation (e.g., 'Is this all correct?'). "
                 "Example: 'So, I have an appointment for {booking_info[name]} on {booking_info[date]} at {booking_info[time]} for {booking_info[purpose]}. Is that all correct?' "
-                "If they say no or want to change something, identify what needs to change and potentially transition back to COLLECTING_BOOKING_INFO for that piece."
+                "In your Thought process, you MUST include: 'Set next state to CS_AWAITING_FINAL_CONFIRMATION.' "
+                "Do NOT use the BookAppointment tool in this current turn. Wait for the user's response."
+            ),
+            CS_AWAITING_FINAL_CONFIRMATION: (
+                "You are in the AWAITING_FINAL_CONFIRMATION state. The user was just asked to confirm all appointment details. "
+                "Their current input ({input}) is their response to that confirmation request. "
+                "If the user's input is a clear affirmation (e.g., 'yes', 'correct', 'perfect', 'proceed'): "
+                "Your Thought process should be: 'User confirmed all details. I will now book the appointment.' "
+                "Then, use the BookAppointment tool with the details from {booking_info}. "
+                "If the user's input is negative or suggests a change (e.g., 'no', 'that date is wrong', 'change the time'): "
+                "Your Thought process should be: 'User wants to change details. I need to ask what to change and go back to collecting info.' "
+                "Your Final Answer should ask the user what specific information they'd like to correct or change. For example: 'Okay, what information isn't correct or what would you like to change?' "
+                "In your Thought, also include: 'Set next state to CS_COLLECTING_BOOKING_INFO.' "
             ),
             CS_VIEWING_APPOINTMENTS: (
                 "You are in the VIEWING_APPOINTMENTS state. The user wants to see their appointments. "
@@ -269,10 +282,11 @@ class AppointmentAgent:
             - For purpose: "Please provide the purpose of your appointment"
         21. If the user provides information in the wrong format, politely ask them to provide it in the correct format.
         22. If the user asks for examples of valid purposes, use the GetPurposeExamples tool.
-        23. When you have all required information (has_all_info is true), use the BookAppointment tool to book the appointment.
+        23. When you have all required information (has_all_info is true) AND you are in a state where booking is the next logical step (e.g., CS_AWAITING_FINAL_CONFIRMATION after user confirmed details), use the BookAppointment tool. Do NOT use BookAppointment if you are in CS_CONFIRMING_BOOKING_INFO waiting for user's yes/no answer.
         24. After successfully booking an appointment, confirm the details with the user and ask if they need anything else.
         (Instruction 25 removed as per subtask)
         26. When providing a Final Answer related to booking, summarize all currently known booking details (Name, Date, Time, Purpose) if available.
+        27. In your 'Thought:' process, if you are clarifying, confirming, or have just determined a specific purpose for the appointment based on the conversation, explicitly state it using the format 'Effective current purpose: [the specific purpose string]'. If no specific purpose is active or clear, you can omit this or state 'Effective current purpose: None'. This helps ensure the correct purpose is tracked.
         
         {state_specific_instructions}
 
@@ -460,7 +474,7 @@ class AppointmentAgent:
 
                     date_was_intended_by_user = date_is_different_from_default_date or user_likely_mentioned_date
 
-                    if state["booking_info"]["date"] is None and date_was_intended_by_user:
+                    if date_was_intended_by_user: # Allow overwrite
                         extracted_date_obj = parsed_dt.date()
 
                         # Year handling: if no year was explicitly mentioned and the parsed date (with current year) is in the past, assume next year.
@@ -472,7 +486,7 @@ class AppointmentAgent:
                                 extracted_date_obj = extracted_date_obj.replace(year=extracted_date_obj.year + 1, day=28)
 
                         state["booking_info"]["date"] = extracted_date_obj.strftime("%Y-%m-%d")
-                        logger.info(f"Extracted date: {state['booking_info']['date']}")
+                        logger.info(f"Extracted/Updated date: {state['booking_info']['date']}")
 
                     # Heuristic to decide if a time was likely mentioned by the user:
                     # 1. Did the parser pick up a time different from midnight (which is default for date-only strings)?
@@ -488,9 +502,14 @@ class AppointmentAgent:
                     time_was_intended_by_user = time_is_different_from_default_time or user_likely_mentioned_time
 
 
-                    if state["booking_info"]["time"] is None and time_was_intended_by_user:
+                    if time_was_intended_by_user: # Allow overwrite
+                        # Heuristic to set minutes to 00 if "11am" style input and minutes are non-zero
+                        if parsed_dt.minute != 0 and (re.search(r'\bam\b|\bpm\b', last_message, re.IGNORECASE)) and not (re.search(r'\d:\d{2}', last_message)):
+                             logger.info(f"Time heuristic: Input '{last_message}', parsed time {parsed_dt.time()}. Contains am/pm and no colon. Resetting minutes to 00.")
+                             parsed_dt = parsed_dt.replace(minute=0, second=0)
+
                         state["booking_info"]["time"] = parsed_dt.strftime("%H:%M")
-                        logger.info(f"Extracted time: {state['booking_info']['time']}")
+                        logger.info(f"Extracted/Updated time: {state['booking_info']['time']}")
 
                 except (dateutil_parser.ParserError, OverflowError) as e:
                     logger.info(f"Could not parse date/time from '{last_message}': {e}")
@@ -563,7 +582,35 @@ class AppointmentAgent:
                     state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
                     logger.info(f"LLM signaled to set next state to {CS_COLLECTING_BOOKING_INFO}.")
                     llm_signaled_next_state = True
+                elif "set next state to cs_awaiting_final_confirmation" in thought_text: # New
+                    state["conversation_state"] = CS_AWAITING_FINAL_CONFIRMATION
+                    logger.info(f"LLM signaled to set next state to {CS_AWAITING_FINAL_CONFIRMATION}.")
+                    llm_signaled_next_state = True
                 # Add other states here if needed in the future
+
+                # New logic for parsing effective purpose
+                purpose_signal_match = re.search(r"effective current purpose: (.*)", thought_text, re.IGNORECASE)
+                if purpose_signal_match:
+                    extracted_llm_purpose = purpose_signal_match.group(1).strip()
+                    if extracted_llm_purpose.lower() == "none":
+                        extracted_llm_purpose = None # Standardize None
+
+                    if state["booking_info"]["purpose"] != extracted_llm_purpose:
+                        if extracted_llm_purpose is not None: # Only update if LLM provided a new, non-None purpose
+                            # Heuristic: Allow update if new purpose is more specific or old one was very generic
+                            is_old_purpose_generic = False
+                            if state["booking_info"]["purpose"]:
+                                generic_phrases = ["help", "process", "new here", "i dont know", "assist"]
+                                if any(phrase in state["booking_info"]["purpose"].lower() for phrase in generic_phrases) and len(state["booking_info"]["purpose"].split()) > 3:
+                                    is_old_purpose_generic = True
+
+                            if is_old_purpose_generic or state["booking_info"]["purpose"] is None or \
+                               (extracted_llm_purpose and state["booking_info"]["purpose"] != extracted_llm_purpose): # Allow overwriting if different
+                                logger.info(f"LLM signaled effective purpose: '{extracted_llm_purpose}'. Updating from old: '{state['booking_info']['purpose']}'.")
+                                state["booking_info"]["purpose"] = extracted_llm_purpose
+                        elif state["booking_info"]["purpose"] is not None and extracted_llm_purpose is None:
+                            # Optional: Decide if LLM saying "None" should clear an existing specific purpose. For now, let's not clear it unless explicitly handled.
+                            logger.info(f"LLM signaled effective purpose: None. Current purpose '{state['booking_info']['purpose']}' will be kept unless explicitly cleared by other logic.")
 
             if not llm_signaled_next_state and \
                current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS and \
