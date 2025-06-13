@@ -78,18 +78,22 @@ class AppointmentAgent:
         }
         self.prompt_segments = {
             CS_INITIAL_GREETING: (
-                "You are in the INITIAL_GREETING state. "
-                "Start the conversation with a friendly and welcoming message. "
-                "Briefly introduce yourself and what you can help with. "
-                "If the user's first message is very short or just a greeting (e.g., 'hi'), use the HandleGreeting tool. "
-                "Otherwise, try to understand their intent from their first message to transition to a more specific state."
+                "You are in the INITIAL_GREETING state. This is the user's first interaction or a fresh start. "
+                "Analyze the user's first message ({history} will be empty or just their message). "
+                "If the user's message is ONLY a simple greeting (e.g., 'hi', 'hello', 'hey'), then using the HandleGreeting tool is appropriate to provide standard options. "
+                "However, if the user says they are new, asks for help, or asks what you can do (e.g., 'i am new here', 'help me', 'what can you do?'), "
+                "DO NOT use HandleGreeting. Instead, formulate a direct, welcoming, and informative response. "
+                "For example: 'Hello! I'm an appointment booking assistant. I can help you schedule new appointments, view existing ones, or show you examples of common appointment purposes. What would you like to do today, or would you like a bit more detail on how I can help?' "
+                "Your goal is to be immediately helpful and engaging based on their initial statement."
             ),
             CS_GENERAL_INQUIRY: (
-                "You are in the GENERAL_INQUIRY state. "
-                "The user's query is not specific yet. "
-                "Listen carefully, use the conversation {history} for context. "
-                "Politely ask clarifying questions if needed to understand their goal (e.g., booking, viewing, help). "
-                "Guide them towards a specific task you can perform."
+                "You are in the GENERAL_INQUIRY state. The user's immediate need isn't yet a specific task like booking or viewing. "
+                "Review the {history} to understand how you got to this state. "
+                "If the user just indicated they are new or asked for general help in the previous turn, be proactive. "
+                "Offer to explain the booking process, show examples of appointment purposes (consider using GetPurposeExamples tool if they seem unsure where to start), or ask open-ended guiding questions to help them formulate their request. "
+                "Example for a new user: 'Since you're new, I can quickly explain how booking works, or I can show you some example appointment reasons. What would be more helpful for you right now?' "
+                "For other general inquiries, listen carefully and politely ask clarifying questions to guide them towards a task you can perform (booking, viewing, examples). "
+                "Your aim is to help the user figure out how you can assist them."
             ),
             CS_COLLECTING_BOOKING_INFO: (
                 "You are in the COLLECTING_BOOKING_INFO state. Your goal is to gather all necessary details for an appointment. "
@@ -176,7 +180,7 @@ class AppointmentAgent:
         
         Important Instructions:
         1. Be friendly and conversational in your responses.
-        2. If the user's input is unclear or too short (like "hi", "hello", etc.), use the HandleGreeting tool ONCE.
+        2. Consider using the HandleGreeting tool if the user provides *only* a very simple greeting (e.g., 'Hi', 'Hello', 'Hey there'). For most other initial queries, even if short (like 'help me' or 'i am new'), aim to respond contextually first based on the guidance in the state-specific instructions, rather than immediately using HandleGreeting.
         3. When booking appointments:
            - Only use the BookAppointment tool when you have all the required information
         4. If the user wants to view appointments:
@@ -240,30 +244,29 @@ class AppointmentAgent:
             messages = state["messages"]
             logger.info(f"Processing message: {messages[-1]['content']}")
             
-            last_message = messages[-1]["content"].strip() # Ensure leading/trailing whitespace is removed
+            last_message = messages[-1]["content"].strip()
 
-            # Retrieve current_conversation_state for this turn's logic and prompt
-            # This is the state determined by the PREVIOUS turn (or initialization).
             current_conversation_state_for_prompt = state.get("conversation_state", CS_INITIAL_GREETING)
             logger.info(f"Current conversational state (start of call_agent): {current_conversation_state_for_prompt}")
 
-            # State transition logic based on current state and user input
-            # The state["conversation_state"] set here will be for the *next* turn.
-            # The current_conversation_state_for_prompt is for *this* turn's LLM guidance.
             if current_conversation_state_for_prompt == CS_INITIAL_GREETING:
-                if len(last_message) > 10 or any(kw in last_message.lower() for kw in ["book", "appointment", "view", "schedule"]):
+                user_input_lower = last_message.lower()
+                if any(phrase in user_input_lower for phrase in ["new here", "am new", "help", "what can you do", "how does this work", "guide me", "get started"]):
+                    state["conversation_state"] = CS_GENERAL_INQUIRY
+                    logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to new user/help query.")
+                elif len(last_message) > 15 or any(kw in user_input_lower for kw in ["book", "appointment", "view", "schedule", "check"]):
                     state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
-                    logger.info(f"Transitioning state from {CS_INITIAL_GREETING} to {CS_COLLECTING_BOOKING_INFO}")
+                    logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to specific intent.")
                 else:
                     state["conversation_state"] = CS_GENERAL_INQUIRY
-                    logger.info(f"Transitioning state from {CS_INITIAL_GREETING} to {CS_GENERAL_INQUIRY}")
+                    logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} for general/short input.")
 
             elif current_conversation_state_for_prompt == CS_POST_BOOKING_FEEDBACK:
                 logger.info(f"Processing user response ('{last_message}') in CS_POST_BOOKING_FEEDBACK.")
                 if any(kw in last_message.lower() for kw in ["no", "nothing", "nope", "don't", "not now", "that's all", "that is all", "finished", "done", "bye"]):
                     state["conversation_state"] = CS_ENDING_CONVERSATION
                     logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} based on user response.")
-                elif not last_message: # User just hit enter, might mean they are done.
+                elif not last_message:
                     state["conversation_state"] = CS_ENDING_CONVERSATION
                     logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_ENDING_CONVERSATION} due to empty input.")
                 else:
@@ -271,15 +274,13 @@ class AppointmentAgent:
                     logger.info(f"Transitioning from {CS_POST_BOOKING_FEEDBACK} to {CS_GENERAL_INQUIRY} to handle new/unclear request: {last_message}")
 
             elif current_conversation_state_for_prompt == CS_ENDING_CONVERSATION:
-                if last_message: # User provided new input after conversation was thought to be ending
+                if last_message:
                     state["conversation_state"] = CS_GENERAL_INQUIRY
                     logger.info(f"User provided new input ('{last_message}') after conversation was ending. Transitioning from {CS_ENDING_CONVERSATION} to {CS_GENERAL_INQUIRY}.")
-                # If no new message, it remains CS_ENDING_CONVERSATION, LLM will give final goodbye.
 
-            # Booking info extraction - should ideally only happen in relevant states
             if current_conversation_state_for_prompt in [CS_INITIAL_GREETING, CS_COLLECTING_BOOKING_INFO, CS_GENERAL_INQUIRY, CS_CONFIRMING_BOOKING_INFO]:
-                if not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 2: # Basic name heuristic
-                    if state["booking_info"]["name"] is None : state["booking_info"]["name"] = last_message # Only fill if not already set by a specific question
+                if not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 2:
+                    if state["booking_info"]["name"] is None : state["booking_info"]["name"] = last_message
 
                 date_match = re.search(r'\d{4}-\d{2}-\d{2}', last_message)
                 if date_match:
@@ -289,15 +290,12 @@ class AppointmentAgent:
                 if time_match:
                     if state["booking_info"]["time"] is None : state["booking_info"]["time"] = time_match.group(0)
 
-                # Basic purpose heuristic - might need refinement or specific questions
                 if len(last_message.split()) > 3 and not date_match and not time_match and state["booking_info"]["purpose"] is None:
-                    # Avoid overwriting purpose if it was just confirmed or being collected specifically
                     if current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO :
                          state["booking_info"]["purpose"] = last_message
             
             has_all_info = all(state["booking_info"].values())
 
-            # Further state transitions based on new information or state (for next turn)
             if current_conversation_state_for_prompt == CS_COLLECTING_BOOKING_INFO and has_all_info:
                 state["conversation_state"] = CS_CONFIRMING_BOOKING_INFO
                 logger.info(f"Transitioning state from {CS_COLLECTING_BOOKING_INFO} to {CS_CONFIRMING_BOOKING_INFO} as all info is collected.")
@@ -307,7 +305,6 @@ class AppointmentAgent:
                     state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
                     logger.info(f"User wants to change booking info. Transitioning from {CS_CONFIRMING_BOOKING_INFO} to {CS_COLLECTING_BOOKING_INFO}.")
 
-            # The current_conversation_state_for_prompt is what the LLM uses THIS turn for its prompt segment.
             logger.info(f"Conversational state for LLM prompt: {current_conversation_state_for_prompt}")
             response = self.llm.invoke(prompt.format(
                 input=messages[-1]["content"],
@@ -372,7 +369,6 @@ class AppointmentAgent:
                             else:
                                 tool_input = action_input_str
                                 logger.warning(f"BookAppointment input is not JSON: {action_input_str}")
-                                # Consider this an error for BookAppointment as it expects JSON
                                 result_content = f"Error: Expected JSON input for BookAppointment but received: {action_input_str}"
                                 state["conversation_state"] = CS_HANDLING_TOOL_ERROR
                                 logger.info(f"Transitioning state to {CS_HANDLING_TOOL_ERROR} due to non-JSON input for BookAppointment.")
