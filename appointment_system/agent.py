@@ -109,6 +109,8 @@ class AppointmentAgent:
                 "Acknowledge the name and ask for the next piece of information (e.g., date or purpose). For example: 'Thanks, {booking_info[name]}. What date would you like for your appointment (YYYY-MM-DD)?' or 'Got it, {booking_info[name]}. What is the purpose of your visit?' "
                 "Crucially, in your Thought, include: 'Set next state to CS_COLLECTING_BOOKING_INFO.' to ensure the conversation moves to the focused collection state."
 
+                "If you have previously suggested a specific appointment purpose based on user-provided details (e.g., 'Consultation for back pain' after user mentioned 'back pain'), and the user's current input is a continuation of that booking flow (e.g., providing their name), YOU MUST re-iterate this specific purpose in your thought process using 'Effective current purpose: [specific purpose previously discussed]'. Do not revert to 'None' or a more generic purpose if a specific one was contextually relevant."
+
                 "If the user previously indicated they are new or asked for general help (e.g., 'help me', 'i am new here'), and you haven't yet provided substantial guidance: "
                 "If their statement is very broad and indicates a complete lack of understanding (e.g., 'I don't know anything', 'what is this?'), "
                 "your first step should be to provide a concise overview of your main functions. For example: 'I'm an appointment booking assistant. I can help you schedule new appointments, check your existing ones, or show you examples of typical appointment reasons. To get started, you can tell me what you'd like to do, like saying 'book an appointment' or 'view my appointments'.' "
@@ -130,6 +132,7 @@ class AppointmentAgent:
             ),
             CS_COLLECTING_BOOKING_INFO: (
                 "You are in the COLLECTING_BOOKING_INFO state. Your goal is to gather all necessary details for an appointment. "
+                "Before asking for missing information, review the current {booking_info[purpose]}. If it is very generic (e.g., contains 'help', 'process', 'new here') AND the conversation history ({history}) indicates a more specific purpose was discussed or offered (e.g., 'consultation for back pain'), your FIRST action in this state should be to confirm this more specific purpose. For example: 'Okay, and this is for the back pain consultation, correct?'. If the user confirms, ensure your thought includes 'Effective current purpose: [specific purpose confirmed by user]'. Then proceed to collect other missing details."
                 "Review {booking_info} to see what's already collected. Also, check {history} for recent user inputs. "
 
                 "If {booking_info[purpose]} is already set (e.g., from a previous confirmation or user statement), start by acknowledging it. "
@@ -365,20 +368,28 @@ class AppointmentAgent:
             if made_booking_offer and user_affirmed:
                 logger.info(f"User affirmed a previous booking offer. Last agent msg: '{agents_previous_content}', User input: '{last_message}'")
 
-                # Check if the currently stored name is suspect
-                current_name = state["booking_info"]["name"]
-                if current_name:
-                    suspect_keywords = ["new here", "help", "please", "process", "assist", "guide"]
-                    words_in_name = current_name.lower().split()
-                    if any(kw in words_in_name for kw in suspect_keywords) or len(words_in_name) > 4:
-                        logger.info(f"Suspect name '{current_name}' found after user affirmation. Clearing it to re-prompt.")
-                        state["booking_info"]["name"] = None # Clear suspect name
+                # When user affirms a booking offer, do NOT clear the name here.
+                # The affirmation is for the booking action.
+                # Name, if already collected and valid, should persist.
 
                 state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
-                current_conversation_state_for_prompt = CS_COLLECTING_BOOKING_INFO
-                if potential_purpose_from_offer and state["booking_info"]["purpose"] is None:
-                    state["booking_info"]["purpose"] = potential_purpose_from_offer
-                    logger.info(f"Pre-filled purpose from offer: '{potential_purpose_from_offer}'")
+                current_conversation_state_for_prompt = CS_COLLECTING_BOOKING_INFO # Ensure this is set for the LLM prompt
+
+                if potential_purpose_from_offer:
+                    current_b_purpose = state["booking_info"]["purpose"]
+                    is_current_purpose_generic = False
+                    if current_b_purpose:
+                        generic_phrases = ["help", "process", "new here", "i dont know", "assist", "start", "what i want to do"]
+                        if any(phrase in current_b_purpose.lower() for phrase in generic_phrases) and len(current_b_purpose.split()) > 2:
+                            is_current_purpose_generic = True
+
+                    if current_b_purpose is None or is_current_purpose_generic or current_b_purpose != potential_purpose_from_offer:
+                        logger.info(f"User affirmed booking offer. Setting/Updating purpose from offer: '{potential_purpose_from_offer}'. Old purpose was: '{current_b_purpose}'.")
+                        state["booking_info"]["purpose"] = potential_purpose_from_offer
+                    else:
+                        logger.info(f"User affirmed booking offer. Purpose from offer '{potential_purpose_from_offer}' matches current. No change to purpose.")
+                else:
+                    logger.info("User affirmed booking offer, but no specific purpose was extracted from the offer itself. Retaining existing purpose (if any).")
             else:
                 if current_conversation_state_for_prompt == CS_INITIAL_GREETING:
                     user_input_lower = last_message.lower()
@@ -549,6 +560,28 @@ class AppointmentAgent:
             
             has_all_info = all(state["booking_info"].values())
 
+            # Check if a name was newly extracted in this turn and if the message was primarily a name
+            if state["booking_info"]["name"] is not None and \
+               current_conversation_state_for_prompt == CS_GENERAL_INQUIRY:
+                words_in_last_message = last_message.lower().split()
+                num_words = len(words_in_last_message)
+                is_likely_just_name_statement = False
+                if 2 <= num_words <= 4:
+                    non_name_keywords = ["help", "assist", "guide", "what", "how", "why", "can", "could", "show", "tell", "explain", "book", "appointment", "view", "date", "time", "purpose"]
+                    name_related_keywords = ["is", "am", "name"]
+                    contains_non_name_keyword = False
+                    for word in words_in_last_message:
+                        if word not in name_related_keywords and word in non_name_keywords:
+                            contains_non_name_keyword = True
+                            break
+                    if not contains_non_name_keyword and "?" not in last_message:
+                        is_likely_just_name_statement = True
+
+                if is_likely_just_name_statement:
+                    logger.info(f"User input '{last_message}' identified as primarily a name. Name '{state['booking_info']['name']}' is present. Switching to CS_COLLECTING_BOOKING_INFO.")
+                    current_conversation_state_for_prompt = CS_COLLECTING_BOOKING_INFO
+                    state["conversation_state"] = CS_COLLECTING_BOOKING_INFO # Ensure main state is also updated
+
             if current_conversation_state_for_prompt == CS_COLLECTING_BOOKING_INFO and has_all_info:
                 state["conversation_state"] = CS_CONFIRMING_BOOKING_INFO
                 logger.info(f"Transitioning state from {CS_COLLECTING_BOOKING_INFO} to {CS_CONFIRMING_BOOKING_INFO} as all info is collected.")
@@ -593,24 +626,24 @@ class AppointmentAgent:
                 if purpose_signal_match:
                     extracted_llm_purpose = purpose_signal_match.group(1).strip()
                     if extracted_llm_purpose.lower() == "none":
-                        extracted_llm_purpose = None # Standardize None
+                        extracted_llm_purpose = None
 
-                    if state["booking_info"]["purpose"] != extracted_llm_purpose:
-                        if extracted_llm_purpose is not None: # Only update if LLM provided a new, non-None purpose
-                            # Heuristic: Allow update if new purpose is more specific or old one was very generic
-                            is_old_purpose_generic = False
-                            if state["booking_info"]["purpose"]:
-                                generic_phrases = ["help", "process", "new here", "i dont know", "assist"]
-                                if any(phrase in state["booking_info"]["purpose"].lower() for phrase in generic_phrases) and len(state["booking_info"]["purpose"].split()) > 3:
-                                    is_old_purpose_generic = True
+                    current_purpose = state["booking_info"]["purpose"]
 
-                            if is_old_purpose_generic or state["booking_info"]["purpose"] is None or \
-                               (extracted_llm_purpose and state["booking_info"]["purpose"] != extracted_llm_purpose): # Allow overwriting if different
-                                logger.info(f"LLM signaled effective purpose: '{extracted_llm_purpose}'. Updating from old: '{state['booking_info']['purpose']}'.")
-                                state["booking_info"]["purpose"] = extracted_llm_purpose
-                        elif state["booking_info"]["purpose"] is not None and extracted_llm_purpose is None:
-                            # Optional: Decide if LLM saying "None" should clear an existing specific purpose. For now, let's not clear it unless explicitly handled.
-                            logger.info(f"LLM signaled effective purpose: None. Current purpose '{state['booking_info']['purpose']}' will be kept unless explicitly cleared by other logic.")
+                    if extracted_llm_purpose is not None:
+                        is_current_purpose_generic = False
+                        if current_purpose:
+                            generic_phrases = ["help", "process", "new here", "i dont know", "assist", "start", "what i want to do"]
+                            if any(phrase in current_purpose.lower() for phrase in generic_phrases) and len(current_purpose.split()) > 2: # Adjusted length
+                                is_current_purpose_generic = True
+
+                        if current_purpose is None or is_current_purpose_generic or current_purpose != extracted_llm_purpose:
+                            logger.info(f"LLM signaled effective purpose: '{extracted_llm_purpose}'. Updating from old: '{current_purpose}'.")
+                            state["booking_info"]["purpose"] = extracted_llm_purpose
+                        else:
+                            logger.info(f"LLM signaled effective purpose: '{extracted_llm_purpose}', which matches current. No change.")
+                    else: # extracted_llm_purpose is None
+                        logger.info(f"LLM signaled effective purpose: None. Current purpose '{current_purpose}' will be kept.")
 
             if not llm_signaled_next_state and \
                current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS and \
