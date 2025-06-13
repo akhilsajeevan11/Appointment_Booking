@@ -100,6 +100,12 @@ class AppointmentAgent:
                 "first try to understand their response. They might have a question, a hesitation, or want to modify something. Address that first. "
                 "Example: If you offered to book 'Dental Checkup' and user said 'hmm, how long does that take?', answer the question, then gently ask if they still want to book it or need other info. "
 
+                "HANDLING NEWLY PROVIDED NAME: If the user's current input ({input}) has just resulted in {booking_info[name]} being populated (e.g., they said 'My name is John' or 'i am indhu k'), "
+                "AND other booking details like {booking_info[date]} or {booking_info[purpose]} are still missing, this is a strong signal they might want to book. "
+                "Your Thought process should be: 'The user has provided their name: {booking_info[name]}. I should now collect the remaining details for booking.' "
+                "Acknowledge the name and ask for the next piece of information (e.g., date or purpose). For example: 'Thanks, {booking_info[name]}. What date would you like for your appointment (YYYY-MM-DD)?' or 'Got it, {booking_info[name]}. What is the purpose of your visit?' "
+                "Crucially, in your Thought, include: 'Set next state to CS_COLLECTING_BOOKING_INFO.' to ensure the conversation moves to the focused collection state."
+
                 "If the user previously indicated they are new or asked for general help, and you haven't yet provided substantial guidance: "
                 "Be proactive. Offer to explain the booking process, or suggest showing examples of appointment purposes (consider GetPurposeExamples tool if they seem broadly unsure). "
                 "Example for a new user: 'Since you're new, I can quickly explain how booking works, or I can show you some example appointment reasons. What would be more helpful for you right now?' "
@@ -461,6 +467,11 @@ class AppointmentAgent:
                     state["conversation_state"] = CS_AWAITING_RESPONSE_TO_OPTIONS
                     logger.info(f"LLM signaled to set next state to {CS_AWAITING_RESPONSE_TO_OPTIONS}.")
                     llm_signaled_next_state = True
+                elif "set next state to cs_collecting_booking_info" in thought_text:
+                    state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
+                    logger.info(f"LLM signaled to set next state to {CS_COLLECTING_BOOKING_INFO}.")
+                    llm_signaled_next_state = True
+                # Add other states here if needed in the future
 
             if not llm_signaled_next_state and \
                current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS and \

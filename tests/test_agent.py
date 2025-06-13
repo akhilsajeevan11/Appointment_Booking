@@ -319,6 +319,66 @@ class TestAgentLogic(unittest.TestCase):
         self.assertIsNone(final_agent_output_obj['booking_info']['name'],
                           "Booking_info.name should have been cleared by the agent's logic before calling the LLM.")
 
+    def test_transition_to_collecting_info_after_name_provided(self):
+        # Simulate conversation history:
+        # 1. User: asks to explain booking
+        # 2. Agent: explains booking
+        # 3. User: provides their name ("i am Test User")
+
+        history_messages = [
+            {"role": "user", "content": "Can you explain how booking works?"},
+            {"role": "assistant", "content": "Final Answer: To book, I need name, date, time, purpose. For example..."} # Simplified agent explanation
+        ]
+
+        user_provides_name_input = "i am Test User" # 4 words, fits extraction rules
+
+        # Expected LLM behavior after name is provided:
+        # The LLM should be guided by the modified CS_GENERAL_INQUIRY prompt (for handling newly provided name)
+        # to acknowledge the name, ask for the next detail, and signal transition to CS_COLLECTING_BOOKING_INFO.
+        self.mock_llm_instance.invoke.return_value = MagicMock(
+            content="Thought: User provided name 'i am Test User'. Acknowledge and ask for date. Set next state to CS_COLLECTING_BOOKING_INFO.\nFinal Answer: Thanks, i am Test User! What date would you like for your appointment (YYYY-MM-DD)?"
+        )
+
+        # State before processing the user's name input
+        state_before_name_provided = {
+            "messages": history_messages + [{"role": "user", "content": user_provides_name_input}],
+            "booking_info": {"name": None, "date": None, "time": None, "purpose": None}, # Name is None initially
+            "last_action": None,
+            "action_count": 0,
+            "conversation_state": CS_GENERAL_INQUIRY # Agent is in general inquiry before processing this new input
+        }
+
+        # Invoke the graph
+        final_agent_output_obj = self.graph.invoke(state_before_name_provided)
+        final_response_content = final_agent_output_obj['current_step']
+
+        # Assertions:
+        # 1. LLM was called once for this interaction.
+        self.mock_llm_instance.invoke.assert_called_once()
+
+        # 2. The agent's response should acknowledge the name and ask for the next detail.
+        self.assertIn("Thanks, i am Test User!", final_response_content)
+        self.assertIn("What date would you like", final_response_content)
+
+        # 3. The booking_info.name in the final state should be the extracted name.
+        #    The name extraction logic: `state["booking_info"]["name"] = last_message` if rules pass.
+        self.assertEqual(final_agent_output_obj['booking_info']['name'], "i am Test User")
+
+        # 4. The conversation state in the *final_agent_output_obj* should be CS_COLLECTING_BOOKING_INFO,
+        #    as signaled by the LLM and processed by the updated call_agent logic.
+        self.assertEqual(final_agent_output_obj['conversation_state'], CS_COLLECTING_BOOKING_INFO)
+
+        # 5. (Optional but good) Check the arguments passed to the LLM prompt formatting.
+        #    The `name` should be "i am Test User" and `current_conversation_state` should be CS_GENERAL_INQUIRY
+        #    when the LLM was called for *this specific turn*.
+        #    The `call_agent` function uses `current_conversation_state_for_prompt` for the LLM call.
+        #    This state is CS_GENERAL_INQUIRY. After the LLM responds with the signal to change state,
+        #    `state['conversation_state']` becomes CS_COLLECTING_BOOKING_INFO. So Assertion 4 is key.
+
+        # llm_call_kwargs = self.mock_llm_instance.invoke.call_args.kwargs
+        # This part is more for deeper debugging if needed and can be omitted for brevity
+        # if the primary assertions (1-4) cover the main functionality.
+
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
     # Ensure Python can find the appointment_system package.
