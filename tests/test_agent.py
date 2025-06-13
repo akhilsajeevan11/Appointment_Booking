@@ -379,6 +379,54 @@ class TestAgentLogic(unittest.TestCase):
         # This part is more for deeper debugging if needed and can be omitted for brevity
         # if the primary assertions (1-4) cover the main functionality.
 
+    def test_general_help_for_clueless_user(self):
+        user_input = "i am new i dont know anything can you please help me"
+
+        # Expected LLM response based on the refined CS_GENERAL_INQUIRY prompt:
+        # The agent should provide an overview of its capabilities.
+        expected_llm_thought = "Thought: The user is new and states they don't know anything. I should provide a concise overview of my main functions as per CS_GENERAL_INQUIRY guidance, then ask how they'd like to proceed."
+        expected_final_answer = "I'm an appointment booking assistant. I can help you schedule new appointments, check your existing ones, or show you examples of typical appointment reasons. To get started, you can tell me what you'd like to do, like saying 'book an appointment' or 'view my appointments'. What would you like to do, or do you need more details on any of these functions?"
+
+        self.mock_llm_instance.invoke.return_value = MagicMock(
+            content=f"{expected_llm_thought}\nFinal Answer: {expected_final_answer}"
+        )
+
+        # Initial state for this user input
+        initial_state = {
+            "messages": [{"role": "user", "content": user_input}],
+            "booking_info": {"name": None, "date": None, "time": None, "purpose": None},
+            "last_action": None,
+            "action_count": 0,
+            # The user's input "i am new..." should transition from INITIAL_GREETING to GENERAL_INQUIRY
+            # in the call_agent logic before the LLM is invoked.
+            "conversation_state": CS_INITIAL_GREETING
+        }
+
+        # Invoke the graph
+        final_agent_output_obj = self.graph.invoke(initial_state)
+        final_response_content = final_agent_output_obj['current_step'] # This is the raw LLM output
+
+        # Assertions:
+        # 1. LLM was called once.
+        self.mock_llm_instance.invoke.assert_called_once()
+
+        # 2. The agent's response (which is the LLM's Final Answer) should contain the overview.
+        self.assertIn("I'm an appointment booking assistant.", final_response_content)
+        self.assertIn("schedule new appointments, check your existing ones, or show you examples", final_response_content)
+        self.assertIn("To get started, you can tell me what you'd like to do", final_response_content)
+
+        # 3. Verify that the conversation_state for the LLM prompt was CS_GENERAL_INQUIRY.
+        #    The call_agent logic should transition from CS_INITIAL_GREETING to CS_GENERAL_INQUIRY
+        #    for this type of input.
+        #    The state recorded in final_agent_output_obj is the state *after* the LLM call and any
+        #    LLM-signaled state changes.
+        #    Our mocked LLM doesn't signal a state change here.
+        #    The call_agent logic transitions CS_INITIAL_GREETING -> CS_GENERAL_INQUIRY for such inputs.
+        #    Then, when the LLM is called with CS_GENERAL_INQUIRY, and if it doesn't signal a state change,
+        #    the state in final_agent_output_obj['conversation_state'] should be CS_GENERAL_INQUIRY.
+        self.assertEqual(final_agent_output_obj['conversation_state'], CS_GENERAL_INQUIRY,
+                         "The conversation state after the LLM response should be CS_GENERAL_INQUIRY as no further transition was signaled.")
+
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
     # Ensure Python can find the appointment_system package.

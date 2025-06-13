@@ -106,9 +106,12 @@ class AppointmentAgent:
                 "Acknowledge the name and ask for the next piece of information (e.g., date or purpose). For example: 'Thanks, {booking_info[name]}. What date would you like for your appointment (YYYY-MM-DD)?' or 'Got it, {booking_info[name]}. What is the purpose of your visit?' "
                 "Crucially, in your Thought, include: 'Set next state to CS_COLLECTING_BOOKING_INFO.' to ensure the conversation moves to the focused collection state."
 
-                "If the user previously indicated they are new or asked for general help, and you haven't yet provided substantial guidance: "
-                "Be proactive. Offer to explain the booking process, or suggest showing examples of appointment purposes (consider GetPurposeExamples tool if they seem broadly unsure). "
-                "Example for a new user: 'Since you're new, I can quickly explain how booking works, or I can show you some example appointment reasons. What would be more helpful for you right now?' "
+                "If the user previously indicated they are new or asked for general help (e.g., 'help me', 'i am new here'), and you haven't yet provided substantial guidance: "
+                "If their statement is very broad and indicates a complete lack of understanding (e.g., 'I don't know anything', 'what is this?'), "
+                "your first step should be to provide a concise overview of your main functions. For example: 'I'm an appointment booking assistant. I can help you schedule new appointments, check your existing ones, or show you examples of typical appointment reasons. To get started, you can tell me what you'd like to do, like saying 'book an appointment' or 'view my appointments'.' "
+                "After providing this overview, you can then ask what they'd like to do or if they need more details on any of those functions. "
+                "For less broad 'new user' queries, or if they respond to the overview by asking for more specific help, you can then offer to explain the booking process in detail, or show examples of appointment purposes (consider GetPurposeExamples tool if they seem broadly unsure of the *type* of appointment they need). "
+                "Example for a new user who seems to have some idea: 'Since you're new, I can quickly explain how booking works, or I can show you some example appointment reasons. What would be more helpful for you right now?' "
 
                 "SPECIAL CASE for name confirmation: If your last message asked the user to confirm a name stored in {booking_info[name]} AND to provide other details (like date/time), "
                 "AND the {booking_info[name]} looks like a placeholder phrase (e.g., contains 'new here', 'help', 'assist', 'process', or is longer than 4 words) rather than a real name, "
