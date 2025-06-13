@@ -350,7 +350,7 @@ class AppointmentAgent:
                         state["conversation_state"] = CS_GENERAL_INQUIRY
                         logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} for general/short input.")
 
-            elif current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS:
+            if current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS:
                 logger.info(f"In CS_AWAITING_RESPONSE_TO_OPTIONS, processing user choice: '{last_message}'. LLM will determine next specific task state.")
                 pass
 
@@ -547,4 +547,3 @@ class AppointmentAgent:
         
         return app
 
-[end of appointment_system/agent.py]
