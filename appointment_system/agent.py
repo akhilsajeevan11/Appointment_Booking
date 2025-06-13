@@ -11,6 +11,8 @@ from typing import List, Union, Dict, Any, TypedDict
 import re
 import json
 import logging
+from dateutil import parser as dateutil_parser
+from datetime import datetime, time as dt_time # Add dt_time for time object comparison
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -428,16 +430,83 @@ class AppointmentAgent:
                     else:
                         logger.info(f"Skipping name extraction for: {last_message} based on new rules.")
 
-                date_match = re.search(r'\d{4}-\d{2}-\d{2}', last_message)
-                if date_match:
-                    if state["booking_info"]["date"] is None : state["booking_info"]["date"] = date_match.group(0)
-                time_match = re.search(r'\d{2}:\d{2}', last_message.lower())
-                if time_match:
-                    if state["booking_info"]["time"] is None : state["booking_info"]["time"] = time_match.group(0)
-                if len(last_message.split()) > 3 and not date_match and not time_match and \
-                   state["booking_info"]["purpose"] is None and not (made_booking_offer and user_affirmed and potential_purpose_from_offer):
-                    if current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO :
-                         state["booking_info"]["purpose"] = last_message
+            # Date and Time Extraction using dateutil.parser
+            if state["booking_info"]["date"] is None or state["booking_info"]["time"] is None:
+                try:
+                    # Use fuzzy parsing to ignore irrelevant parts of the string.
+                    # default to now() helps if only time is given (uses today's date)
+                    # or if only date is given (uses midnight time).
+                    parsed_dt = dateutil_parser.parse(last_message, fuzzy=True, default=datetime.now())
+
+                    potential_date_keywords = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec', 'today', 'tomorrow', 'next week', 'next month']
+                    contains_date_keyword = any(kw in last_message.lower() for kw in potential_date_keywords)
+                    # Basic check for day numbers, e.g., "20th", "5", "august 20"
+                    contains_day_pattern = re.search(r'\b(\d{1,2})(st|nd|rd|th)?\b', last_message.lower()) is not None
+                    # Check for year pattern
+                    contains_year_pattern = re.search(r'\b(20\d{2})\b', last_message.lower()) is not None
+
+
+                    # Heuristic to decide if a date was likely mentioned by the user:
+                    # 1. Did the parser pick up a date different from today's date?
+                    # 2. Or, did the user's message contain explicit date-related keywords or patterns?
+                    date_is_different_from_default_date = parsed_dt.date() != datetime.now().date()
+                    user_likely_mentioned_date = contains_date_keyword or contains_day_pattern or contains_year_pattern
+
+                    date_was_intended_by_user = date_is_different_from_default_date or user_likely_mentioned_date
+
+                    if state["booking_info"]["date"] is None and date_was_intended_by_user:
+                        extracted_date_obj = parsed_dt.date()
+
+                        # Year handling: if no year was explicitly mentioned and the parsed date (with current year) is in the past, assume next year.
+                        if not contains_year_pattern and extracted_date_obj < datetime.now().date():
+                            logger.info(f"Extracted date {extracted_date_obj} is in the past and no year mentioned, trying next year.")
+                            try:
+                                extracted_date_obj = extracted_date_obj.replace(year=extracted_date_obj.year + 1)
+                            except ValueError: # Handle Feb 29 on non-leap year if year is incremented
+                                extracted_date_obj = extracted_date_obj.replace(year=extracted_date_obj.year + 1, day=28)
+
+                        state["booking_info"]["date"] = extracted_date_obj.strftime("%Y-%m-%d")
+                        logger.info(f"Extracted date: {state['booking_info']['date']}")
+
+                    # Heuristic to decide if a time was likely mentioned by the user:
+                    # 1. Did the parser pick up a time different from midnight (which is default for date-only strings)?
+                    # 2. Or, did the user's message contain explicit time-related keywords or patterns?
+                    time_is_different_from_default_time = parsed_dt.time() != dt_time(0, 0) # dt_time(0,0) is midnight
+                    contains_time_keyword = any(kw in last_message.lower() for kw in ['am', 'pm', 'noon', 'midnight', 'o\'clock', 'hour', 'minute'])
+                    # Check for explicit hour numbers like 7, 09, 14, possibly with am/pm or colon
+                    contains_hour_pattern = re.search(r'\b([0-1]?[0-9]|2[0-3])(:[0-5][0-9])?(\s*(am|pm))?\b', last_message.lower()) is not None
+
+                    user_likely_mentioned_time = contains_time_keyword or contains_hour_pattern
+
+                    # If the time parsed is not the default (midnight) OR the user explicitly mentioned time-like words
+                    time_was_intended_by_user = time_is_different_from_default_time or user_likely_mentioned_time
+
+
+                    if state["booking_info"]["time"] is None and time_was_intended_by_user:
+                        state["booking_info"]["time"] = parsed_dt.strftime("%H:%M")
+                        logger.info(f"Extracted time: {state['booking_info']['time']}")
+
+                except (dateutil_parser.ParserError, OverflowError) as e:
+                    logger.info(f"Could not parse date/time from '{last_message}': {e}")
+                except Exception as e: # Catch any other unexpected errors during parsing
+                    logger.error(f"Unexpected error during date/time parsing of '{last_message}': {e}")
+
+            # Purpose extraction (simplified, ensure it doesn't overwrite if already set and fuzzy matched a date/time)
+            if state["booking_info"]["purpose"] is None and \
+               not (made_booking_offer and user_affirmed and potential_purpose_from_offer) and \
+               len(last_message.split()) > 3: # Basic heuristic: purpose is likely longer
+                # Avoid using parts of message that were clearly identified as date/time for purpose
+                temp_purpose_message = last_message
+                if state["booking_info"]["date"] and state["booking_info"]["date"] in temp_purpose_message:
+                     temp_purpose_message = temp_purpose_message.replace(state["booking_info"]["date"], "").strip()
+                if state["booking_info"]["time"] and state["booking_info"]["time"] in temp_purpose_message:
+                     temp_purpose_message = temp_purpose_message.replace(state["booking_info"]["time"], "").strip()
+
+                if len(temp_purpose_message.split()) > 2 and current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO: # Check length again after stripping
+                    # Further check to ensure it's not just date/time related keywords
+                    if not (contains_date_keyword or contains_day_pattern or contains_year_pattern or contains_time_keyword or contains_hour_pattern and len(temp_purpose_message.split()) < 5) :
+                        state["booking_info"]["purpose"] = temp_purpose_message
+                        logger.info(f"Extracted purpose: {state['booking_info']['purpose']}")
             
             has_all_info = all(state["booking_info"].values())
 

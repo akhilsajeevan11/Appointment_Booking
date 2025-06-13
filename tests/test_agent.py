@@ -6,11 +6,13 @@ import os
 
 # Attempt to import from the project structure
 # This assumes 'appointment_system' is in the Python path or PYTHONPATH is set up
+from datetime import datetime as dt, date as test_date, time as test_time, timedelta # Use 'dt' to avoid conflict
 try:
-    from appointment_system.agent import AppointmentAgent, AgentState, CustomPromptTemplate, CS_GENERAL_INQUIRY, CS_COLLECTING_BOOKING_INFO
+    from appointment_system.agent import AppointmentAgent, AgentState, CustomPromptTemplate, CS_GENERAL_INQUIRY, CS_COLLECTING_BOOKING_INFO, CS_INITIAL_GREETING # Added CS_INITIAL_GREETING
     from appointment_system.tools import AppointmentTools
 except ImportError:
     # Fallback for environments where direct import might be tricky
+    CS_INITIAL_GREETING = "INITIAL_GREETING" # Add stub for CS_INITIAL_GREETING
     # Define minimal stubs if real classes can't be loaded by the subtask runner
     # This is less ideal as it doesn't test the actual classes directly
     print("Warning: Could not import full agent classes, using stubs for testing where necessary.")
@@ -426,6 +428,77 @@ class TestAgentLogic(unittest.TestCase):
         #    the state in final_agent_output_obj['conversation_state'] should be CS_GENERAL_INQUIRY.
         self.assertEqual(final_agent_output_obj['conversation_state'], CS_GENERAL_INQUIRY,
                          "The conversation state after the LLM response should be CS_GENERAL_INQUIRY as no further transition was signaled.")
+
+    # Helper method to set up state and mock LLM for date/time tests
+    def _run_datetime_extraction_test(self, user_input, mock_current_datetime, expected_booking_info_changes):
+        # Mock datetime.now() within the agent's module
+        # The agent uses `from datetime import datetime` and calls `datetime.now()`
+        with patch('appointment_system.agent.datetime', autospec=True) as mock_datetime_class:
+            mock_datetime_class.now.return_value = mock_current_datetime
+
+            # Mock LLM to provide a simple final answer after extraction
+            self.mock_llm_instance.reset_mock() # Reset mock before each call in helper
+            self.mock_llm_instance.invoke.return_value = MagicMock(
+                content="Thought: Extracted info, will confirm or ask for more.\nFinal Answer: Okay, processing that."
+            )
+
+            initial_state = {
+                "messages": [{"role": "user", "content": user_input}],
+                "booking_info": {"name": "TestUser", "date": None, "time": None, "purpose": "Checkup"}, # Assume name and purpose are somehow known
+                "last_action": None,
+                "action_count": 0,
+                "conversation_state": CS_COLLECTING_BOOKING_INFO # Test extraction in this state
+            }
+
+            final_agent_output_obj = self.graph.invoke(initial_state)
+            final_booking_info = final_agent_output_obj['booking_info']
+
+            for key, expected_value in expected_booking_info_changes.items():
+                self.assertEqual(final_booking_info.get(key), expected_value, f"Booking info for '{key}' not as expected.")
+
+            return final_booking_info
+
+    def test_extract_full_date_time_natural_language(self):
+        mock_now = dt(2024, 7, 15, 10, 0) # July 15, 2024, 10:00 AM
+        user_input = "How about August 20 at 11am?"
+        expected_changes = {"date": "2024-08-20", "time": "11:00"}
+        self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+
+    def test_extract_tomorrow_and_time(self):
+        mock_now = dt(2024, 7, 15, 10, 0) # July 15, 2024
+        user_input = "tomorrow 3pm please"
+        expected_date = (mock_now + timedelta(days=1)).strftime("%Y-%m-%d")
+        expected_changes = {"date": expected_date, "time": "15:00"}
+        self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+
+    def test_extract_month_day_defaults_current_year(self):
+        mock_now = dt(2024, 7, 15, 10, 0) # July 15, 2024
+        user_input = "Is September 10th okay?"
+        expected_changes = {"date": "2024-09-10"}
+        final_info = self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+        self.assertIsNone(final_info.get("time"), "Time should not be set if only date is mentioned.")
+
+
+    def test_extract_time_defaults_current_date(self):
+        mock_now = dt(2024, 7, 15, 10, 0) # July 15, 2024
+        user_input = "Can we do 2:30 PM?"
+        expected_changes = {"time": "14:30"}
+        final_info = self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+        self.assertIsNone(final_info.get("date"), "Date should not be set if only time is mentioned and date was initially None.")
+
+
+    def test_extract_month_day_past_date_uses_next_year(self):
+        mock_now = dt(2024, 12, 15, 10, 0) # December 15, 2024
+        user_input = "How about January 10?" # Should be for 2025
+        expected_changes = {"date": "2025-01-10"}
+        final_info = self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+        self.assertIsNone(final_info.get("time"), "Time should not be set if only date is mentioned for next year.")
+
+    def test_extract_date_with_fuzzy_input(self):
+        mock_now = dt(2024, 7, 15, 10, 0)
+        user_input = "I'd like to book for July 25th this year, maybe around 4pm?"
+        expected_changes = {"date": "2024-07-25", "time": "16:00"}
+        self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
 
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
