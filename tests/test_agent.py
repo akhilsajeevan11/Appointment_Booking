@@ -734,6 +734,66 @@ class TestAgentLogic(unittest.TestCase):
         self.assertIsNone(final_info.get("time"),
                           f"Time should be None for date-only input, but was {final_info.get('time')}")
 
+    def test_affirm_booking_offer_asks_next_detail_directly(self):
+        # Scenario:
+        # 1. Agent has some context (e.g., user mentioned back pain, purpose is 'Consultation for back pain').
+        # 2. Agent makes a booking offer: "Okay, [User Name], for the 'Consultation for back pain', shall I proceed to get date and time?"
+        # 3. User says: "yes"
+        # 4. Agent should respond: "Great, [User Name]! For your 'Consultation for back pain', what date would you like (YYYY-MM-DD)?" (assuming name is known, date is next)
+
+        user_name = "Test User"
+        confirmed_purpose = "Consultation for back pain"
+
+        # Setup initial state: name and purpose are known. Agent is about to make an offer.
+        # For this test, we'll start from the user's "yes" after an offer was made.
+        # The agent's last message (in history) would be the offer.
+        agent_offer_message = f"Okay, {user_name}, for the '{confirmed_purpose}', shall I proceed to get date and time?"
+
+        current_messages = [
+            {"role": "assistant", "content": "Some prior conversation..."}, # Simulating some history
+            {"role": "user", "content": "My name is Test User and I have back pain."},
+            {"role": "assistant", "content": agent_offer_message} # Agent's offer
+        ]
+        current_booking_info = {"name": user_name, "date": None, "time": None, "purpose": confirmed_purpose}
+
+        # LLM mock for the turn AFTER user says "yes".
+        # This LLM call will be made with current_conversation_state_for_prompt = CS_COLLECTING_BOOKING_INFO
+        # due to the made_booking_offer & user_affirmed logic in call_agent.
+        # The refined CS_COLLECTING_BOOKING_INFO prompt should then guide this response.
+        expected_agent_response_content = f"Thought: User affirmed booking offer for '{confirmed_purpose}' for '{user_name}'. Date is missing. Ask for date. Effective current purpose: {confirmed_purpose}.\nFinal Answer: Great, {user_name}! For your '{confirmed_purpose}', what date would you like (YYYY-MM-DD)?"
+        self.mock_llm_instance.invoke.return_value = MagicMock(content=expected_agent_response_content)
+
+        user_input_affirmation = "yes"
+        current_messages.append({"role": "user", "content": user_input_affirmation})
+
+        # The state passed to invoke for this turn.
+        # call_agent will identify made_booking_offer=True from agent_offer_message and user_affirmed=True.
+        # It will then set current_conversation_state_for_prompt to CS_COLLECTING_BOOKING_INFO.
+        state_for_affirmation_processing = {
+            "messages": current_messages,
+            "booking_info": current_booking_info,
+            "conversation_state": CS_GENERAL_INQUIRY, # Or whatever state agent was in when it made the offer
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        }
+
+        final_state = self.graph.invoke(state_for_affirmation_processing)
+
+        # 1. Check LLM was called once for this "yes" turn.
+        self.mock_llm_instance.invoke.assert_called_once()
+
+        # 2. Agent's response should ask for the date, not repeat the offer.
+        self.assertIn(f"Great, {user_name}!", final_state['current_step'])
+        self.assertIn(f"For your '{confirmed_purpose}', what date would you like", final_state['current_step'])
+        self.assertNotIn("Shall I proceed", final_state['current_step'].lower(), "Agent should not repeat the offer.")
+
+        # 3. Booking info (name, purpose) should be preserved.
+        self.assertEqual(final_state['booking_info']['name'], user_name)
+        self.assertEqual(final_state['booking_info']['purpose'], confirmed_purpose)
+
+        # 4. Final conversation state should be CS_COLLECTING_BOOKING_INFO (as set by call_agent logic,
+        #    and LLM didn't signal a change from it in this mocked response).
+        self.assertEqual(final_state['conversation_state'], CS_COLLECTING_BOOKING_INFO)
+
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
     # Ensure Python can find the appointment_system package.

@@ -135,23 +135,31 @@ class AppointmentAgent:
                 "Your aim is to understand their current need and help them navigate to a solution."
             ),
             CS_COLLECTING_BOOKING_INFO: (
+                "IMPORTANT CONTEXT: If the user's immediately preceding input (visible in {history} or implied by {input} being a simple affirmation like 'yes', 'sure', 'okay') was an affirmation to a booking offer you just made (e.g., you asked 'Shall I book X for you?' or 'Would you like to book Y?'): "
+                "Your ABSOLUTE PRIORITY now is to collect the NEXT piece of missing information. "
+                "1. Acknowledge any known details, especially the {name} (if known) and the {purpose} (which should have been confirmed by the affirmation). "
+                "2. Then, IMMEDIATELY ask for the very next missing item in this order: NAME (if not yet known or confirmed), DATE (YYYY-MM-DD), TIME (HH:MM). "
+                "3. DO NOT repeat the booking offer. DO NOT get sidetracked by other topics. Focus solely on collecting the next required detail. "
+                "Example if name is missing: 'Okay, for your {purpose} appointment, what is your name?' "
+                "Example if name is known, but date is missing: 'Alright {name}, for the {purpose}, what date would you like (YYYY-MM-DD)?' "
+                "--- (Original CS_COLLECTING_BOOKING_INFO instructions follow) --- "
                 "You are in the COLLECTING_BOOKING_INFO state. Your goal is to gather all necessary details for an appointment. "
-                "Before asking for missing information, review the current {booking_info[purpose]}. If it is very generic (e.g., contains 'help', 'process', 'new here') AND the conversation history ({history}) indicates a more specific purpose was discussed or offered (e.g., 'consultation for back pain'), your FIRST action in this state should be to confirm this more specific purpose. For example: 'Okay, and this is for the back pain consultation, correct?'. If the user confirms, ensure your thought includes 'Effective current purpose: [specific purpose confirmed by user]'. Then proceed to collect other missing details."
-                "Review {booking_info} to see what's already collected. Also, check {history} for recent user inputs. "
+                "Before asking for missing information, review the current {purpose}. If it is very generic (e.g., contains 'help', 'process', 'new here') AND the conversation history ({history}) indicates a more specific purpose was discussed or offered (e.g., 'consultation for back pain'), your FIRST action in this state should be to confirm this more specific purpose. For example: 'Okay, and this is for the back pain consultation, correct?'. If the user confirms, ensure your thought includes 'Effective current purpose: [specific purpose confirmed by user]'. Then proceed to collect other missing details."
+                "Review the current booking details ({name}, {date}, {time}, {purpose}) to see what's already collected. Also, check {history} for recent user inputs. "
 
-                "If {booking_info[purpose]} is already set (e.g., from a previous confirmation or user statement), start by acknowledging it. "
-                "Example if purpose is known: 'Okay, we're setting up your {booking_info[purpose]} appointment. ' "
+                "If {purpose} is already set (e.g., from a previous confirmation or user statement), start by acknowledging it. "
+                "Example if purpose is known: 'Okay, we're setting up your {purpose} appointment. ' "
                 "Then, proceed to ask for the next piece of missing information in a logical order (typically: name, then date YYYY-MM-DD, then time HH:MM). "
-                "If {booking_info[name]} is also known, acknowledge that too: 'For {booking_info[name]} for the {booking_info[purpose]} appointment...' "
+                "If {name} is also known, acknowledge that too: 'For {name} for the {purpose} appointment...' "
 
                 "If a piece of information is provided by the user in their last message, acknowledge it and then ask for the next missing item. "
-                "Example if user just provided name: 'Thanks, {booking_info[name]}. Now, what date would you like for this appointment (in YYYY-MM-DD format)?' "
-                "Example if user just provided date: 'Got it, {booking_info[date]}. And what time (in HH:MM 24-hour format)?' "
-                "Example if user just provided time: 'Perfect, {booking_info[time]}. Lastly, what is the purpose of this appointment?' (Only ask purpose if not already known). "
+                "Example if user just provided name: 'Thanks, {name}. Now, what date would you like for this appointment (in YYYY-MM-DD format)?' "
+                "Example if user just provided date: 'Got it, {date}. And what time (in HH:MM 24-hour format)?' "
+                "Example if user just provided time: 'Perfect, {time}. Lastly, what is the purpose of this appointment?' (Only ask purpose if not already known). "
 
-                "If the user provides information out of order, acknowledge it, ensure it's stored in booking_info, and then ask for the next logical piece. "
+                "If the user provides information out of order, acknowledge it, ensure it's stored in booking_info (this happens in system logic, you focus on asking next), and then ask for the next logical piece. "
                 "Be encouraging and clear. If they say 'yes' or 'correct' to a piece of info you suggested (though less likely in this state unless you are confirming a format), confirm it and move on. "
-                "Your goal is to fill all fields in {booking_info}: name, date, time, and purpose."
+                "Your goal is to fill all fields: name, date, time, and purpose."
             ),
             CS_CONFIRMING_BOOKING_INFO: (
                 "You are in the CONFIRMING_BOOKING_INFO state. All booking details have been collected. "
