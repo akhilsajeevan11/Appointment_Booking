@@ -644,6 +644,96 @@ class TestAgentLogic(unittest.TestCase):
         expected_changes = {"date": "2024-07-25", "time": "16:00"}
         self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
 
+    def test_input_without_date_time_does_not_crash(self):
+        user_input = "i am new here and need help with the process" # Input that contains no date/time
+        # This input would cause UnboundLocalError if heuristic flags are not pre-initialized
+
+        self.mock_llm_instance.invoke.return_value = MagicMock(
+            content="Thought: User is new and needs help. Provide overview.\nFinal Answer: I can help with booking, viewing, or examples. What would you like?"
+        )
+
+        initial_state = {
+            "messages": [{"role": "user", "content": user_input}],
+            "booking_info": {"name": None, "date": None, "time": None, "purpose": None},
+            "conversation_state": CS_GENERAL_INQUIRY, # This state is where the flags are used
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        }
+
+        try:
+            final_state = self.graph.invoke(initial_state)
+            # We mainly care that it doesn't crash. Content of final_state['current_step'] can be checked too.
+            self.assertIn("What would you like?", final_state['current_step'])
+        except UnboundLocalError:
+            self.fail("UnboundLocalError was raised, meaning date/time heuristic flags were not properly initialized.")
+
+    def test_extract_relative_date_tomorrow(self):
+        mock_now = dt(2024, 7, 15, 10, 0) # July 15, 2024
+        user_input = "ok then tommorow" # Note: "tommorow" spelling as per user log
+        expected_date = (mock_now + timedelta(days=1)).strftime("%Y-%m-%d")
+        expected_changes = {"date": expected_date}
+        # This test also implicitly checks if "ok then" is handled by fuzzy parsing or pre-processing
+        final_info = self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+        self.assertIsNone(final_info.get("time"), "Time should not be set for 'ok then tommorow'")
+
+    def test_extract_relative_date_day_after_tomorrow(self):
+        mock_now = dt(2024, 7, 15, 10, 0)
+        user_input = "i just need day after tommorow" # Note: "tommorow" spelling
+        # Pre-processing should change "day after tommorow" to "in 2 days"
+        expected_date = (mock_now + timedelta(days=2)).strftime("%Y-%m-%d")
+        expected_changes = {"date": expected_date}
+        final_info = self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+        self.assertIsNone(final_info.get("time"), "Time should not be set for 'day after tommorow'")
+
+    def test_confirmation_message_uses_correct_specific_details(self):
+        # Setup: name is "Suhail Shaji", purpose is "Consultation for back pain"
+        # Date and time are also known.
+        specific_booking_info = {
+            "name": "Suhail Shaji",
+            "date": "2024-09-20",
+            "time": "11:00",
+            "purpose": "Consultation for back pain"
+        }
+
+        # State where agent is about to generate the confirmation prompt
+        state_entering_confirmation = {
+            "messages": [
+                {"role": "user", "content": "some message that led to all info being collected"},
+            ],
+            "booking_info": specific_booking_info,
+            "conversation_state": CS_COLLECTING_BOOKING_INFO, # This, with all info, will trigger CS_CONFIRMING_BOOKING_INFO for LLM prompt
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        }
+
+        # Mock LLM response when CS_CONFIRMING_BOOKING_INFO is the prompt state
+        # The LLM should use the {name}, {date}, {time}, {purpose} from its context.
+        expected_confirmation_question = "So, I have an appointment for Suhail Shaji on 2024-09-20 at 11:00 for Consultation for back pain. Is that all correct?"
+        self.mock_llm_instance.invoke.return_value = MagicMock(
+            content=f"Thought: All details present. Confirm them. Effective current purpose: Consultation for back pain. Set next state to CS_AWAITING_FINAL_CONFIRMATION.\nFinal Answer: {expected_confirmation_question}"
+        )
+
+        final_state = self.graph.invoke(state_entering_confirmation)
+
+        # Check that the LLM's output (the confirmation question) contains the correct specific details
+        self.assertIn("Suhail Shaji", final_state['current_step'])
+        self.assertIn("2024-09-20", final_state['current_step'])
+        self.assertIn("11:00", final_state['current_step'])
+        self.assertIn("Consultation for back pain", final_state['current_step'])
+        self.assertNotIn("book an appointment", final_state['current_step'], "Generic purpose should not be in confirmation")
+
+        self.assertEqual(final_state['conversation_state'], CS_AWAITING_FINAL_CONFIRMATION)
+
+    def test_date_only_input_does_not_set_random_time(self):
+        mock_now = dt(2024, 8, 1, 14, 59) # Current time is 14:59
+        user_input = "august 2 this year"
+        expected_date = "2024-08-02" # Assuming mock_now is in 2024
+
+        # We expect date to be set, but time to remain None because no time was mentioned.
+        expected_changes = {"date": expected_date}
+        final_info = self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+
+        self.assertIsNone(final_info.get("time"),
+                          f"Time should be None for date-only input, but was {final_info.get('time')}")
+
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
     # Ensure Python can find the appointment_system package.

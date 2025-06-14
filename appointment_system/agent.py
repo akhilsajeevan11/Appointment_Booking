@@ -114,7 +114,7 @@ class AppointmentAgent:
 
                 "If the user previously indicated they are new or asked for general help (e.g., 'help me', 'i am new here'), and you haven't yet provided substantial guidance: "
                 "If their query involves a specific symptom or problem (e.g., 'I have back pain, what should I do?', 'my tooth aches'), your primary response should be to suggest a relevant appointment type (e.g., 'A consultation with a doctor could help with back pain.' or 'A dental check-up would be good for a toothache.'). After suggesting, directly offer to help book that specific type of appointment. For example: 'Would you like me to help you book a [suggested appointment type]?' Only use `GetPurposeExamples` if, after your direct suggestion, the user still expresses broad uncertainty about appointment types or asks for more examples."
-                "If their statement is very broad and indicates a complete lack of understanding (e.g., 'I don't know anything', 'what is this?'), " # This was part of the original block, keeping structure
+                "If their statement is very broad and indicates a complete lack of understanding (e.g., 'I don't know anything', 'what is this?'), "
                 "your first step should be to provide a concise overview of your main functions. For example: 'I'm an appointment booking assistant. I can help you schedule new appointments, check your existing ones, or show you examples of typical appointment reasons. To get started, you can tell me what you'd like to do, like saying 'book an appointment' or 'view my appointments'.' "
                 "After providing this overview, you can then ask what they'd like to do or if they need more details on any of those functions. "
                 "For less broad 'new user' queries, or if they respond to the overview by asking for more specific help, you can then offer to explain the booking process in detail, or show examples of appointment purposes (consider GetPurposeExamples tool if they seem broadly unsure of the *type* of appointment they need). "
@@ -154,10 +154,12 @@ class AppointmentAgent:
                 "Your goal is to fill all fields in {booking_info}: name, date, time, and purpose."
             ),
             CS_CONFIRMING_BOOKING_INFO: (
-                "You are in the CONFIRMING_BOOKING_INFO state. You have all details: {booking_info[name]} on {booking_info[date]} at {booking_info[time]} for {booking_info[purpose]}. "
-                "Your task is to clearly list ALL these details back to the user and ask for their explicit confirmation (e.g., 'Is this all correct?'). "
-                "Example: 'So, I have an appointment for {booking_info[name]} on {booking_info[date]} at {booking_info[time]} for {booking_info[purpose]}. Is that all correct?' "
-                "In your Thought process, you MUST include: 'Set next state to CS_AWAITING_FINAL_CONFIRMATION.' "
+                "You are in the CONFIRMING_BOOKING_INFO state. All booking details have been collected. "
+                "The current details are: Name: {name}, Date: {date}, Time: {time}, Purpose: {purpose}. "
+                "Your task is to CLEARLY LIST ALL these EXACT details back to the user and ask for their explicit confirmation. "
+                "Use the format: 'So, I have an appointment for {name} on {date} at {time} for {purpose}. Is that all correct?' "
+                "In your Thought process, you MUST include 'Set next state to CS_AWAITING_FINAL_CONFIRMATION.' "
+                "Also, in your Thought, you MUST include 'Effective current purpose: {purpose}' using the EXACT purpose value provided above. Do not change or revert it to a generic one. "
                 "Do NOT use the BookAppointment tool in this current turn. Wait for the user's response."
             ),
             CS_AWAITING_FINAL_CONFIRMATION: (
@@ -328,6 +330,14 @@ class AppointmentAgent:
             
             last_message = messages[-1]["content"].strip()
 
+            # Pre-process for specific relative date phrases
+            if "day after tomorrow" in last_message.lower():
+                logger.info("Detected 'day after tomorrow', replacing with 'in 2 days' for parser.")
+                last_message = last_message.lower().replace("day after tomorrow", "in 2 days")
+            elif "day before yesterday" in last_message.lower():
+                logger.info("Detected 'day before yesterday', replacing with '2 days ago' for parser.")
+                last_message = last_message.lower().replace("day before yesterday", "2 days ago")
+
             current_conversation_state_for_prompt = state.get("conversation_state", CS_INITIAL_GREETING)
             logger.info(f"Current conversational state (start of call_agent): {current_conversation_state_for_prompt}")
 
@@ -428,6 +438,14 @@ class AppointmentAgent:
                     state["conversation_state"] = CS_GENERAL_INQUIRY
                     logger.info(f"User provided new input ('{last_message}') after conversation was ending. Transitioning from {CS_ENDING_CONVERSATION} to {CS_GENERAL_INQUIRY}.")
 
+            # Initialize date/time heuristic flags here, *before* the conditional parsing block
+            contains_date_keyword = False
+            contains_day_pattern = False
+            contains_year_pattern = False
+            contains_time_keyword = False
+            contains_hour_pattern = False
+            minute_reset_due_to_keyword_phrase = False
+
             if current_conversation_state_for_prompt in [CS_INITIAL_GREETING, CS_COLLECTING_BOOKING_INFO, CS_GENERAL_INQUIRY, CS_CONFIRMING_BOOKING_INFO] or \
                (made_booking_offer and user_affirmed):
                 # Attempt to extract name if not already set
@@ -461,19 +479,26 @@ class AppointmentAgent:
 
             # Date and Time Extraction using dateutil.parser
             if state["booking_info"]["date"] is None or state["booking_info"]["time"] is None:
-                contains_date_keyword = False
-                contains_day_pattern = False
-                contains_year_pattern = False
-                contains_time_keyword = False
-                contains_hour_pattern = False
-                # These flags will be set to True within the try block if relevant patterns are found.
+                # Flags are initialized above, before name extraction.
+                # Their values are set within this try block if patterns are found.
                 try:
                     # Use fuzzy parsing to ignore irrelevant parts of the string.
                     # default to now() helps if only time is given (uses today's date)
                     # or if only date is given (uses midnight time).
                     parsed_dt = dateutil_parser.parse(last_message, fuzzy=True, default=datetime.now())
 
-                    potential_date_keywords = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec', 'today', 'tomorrow', 'next week', 'next month']
+                    potential_date_keywords = [
+                        'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+                        'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+                        'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
+                        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+                        'today', 'tomorrow', 'yesterday',
+                        'next week', 'last week', 'this week',
+                        'next month', 'last month', 'this month',
+                        'next year', 'last year', 'this year',
+                        'in 2 days', '2 days ago', 'in a week', 'a week ago', # Ensure phrases used in replacements are here
+                        'day after', 'day before' # General phrases that might accompany relative dates
+                    ]
                     contains_date_keyword = any(kw in last_message.lower() for kw in potential_date_keywords)
                     # Basic check for day numbers, e.g., "20th", "5", "august 20"
                     contains_day_pattern = re.search(r'\b(\d{1,2})(st|nd|rd|th)?\b', last_message.lower()) is not None
@@ -504,80 +529,117 @@ class AppointmentAgent:
                         logger.info(f"Extracted/Updated date: {state['booking_info']['date']}")
 
                     # Heuristic to decide if a time was likely mentioned by the user:
-                    # 1. Did the parser pick up a time different from midnight (which is default for date-only strings)?
-                    # 2. Or, did the user's message contain explicit time-related keywords or patterns?
-                    time_is_different_from_default_time = parsed_dt.time() != dt_time(0, 0) # dt_time(0,0) is midnight
-                    contains_time_keyword = any(kw in last_message.lower() for kw in ['am', 'pm', 'noon', 'midnight', 'o\'clock', 'hour', 'minute'])
-                    # Check for explicit hour numbers like 7, 09, 14, possibly with am/pm or colon
-                    contains_hour_pattern = re.search(r'\b([0-1]?[0-9]|2[0-3])(:[0-5][0-9])?(\s*(am|pm))?\b', last_message.lower()) is not None
+                    # Check for explicit time keywords or patterns in the user's message.
+                    potential_time_keywords = ['am', 'pm', 'noon', 'midnight', 'o\'clock', 'hour', 'minute', 'oclock'] # Added oclock
+                    contains_time_keyword = any(kw in last_message.lower() for kw in potential_time_keywords)
+                    # Regex to find HH, HH:MM, optionally with am/pm.
+                    # Ensures it finds patterns like "3pm", "14:30", "7 am".
+                    contains_hour_pattern = re.search(r'\b([0-1]?[0-9]|2[0-3])(?::[0-5][0-9])?(\s*(?:am|pm))?\b', last_message.lower()) is not None
 
-                    user_likely_mentioned_time = contains_time_keyword or contains_hour_pattern
+                    # Time was likely intended if user used explicit time-related words or number patterns for time.
+                    time_was_intended_by_user = contains_time_keyword or contains_hour_pattern
 
-                    # If the time parsed is not the default (midnight) OR the user explicitly mentioned time-like words
-                    time_was_intended_by_user = time_is_different_from_default_time or user_likely_mentioned_time
+                    # Log the decision basis
+                    logger.info(f"Time intention: contains_time_keyword={contains_time_keyword}, contains_hour_pattern={contains_hour_pattern}, determined time_was_intended_by_user={time_was_intended_by_user}")
+
+                    # minute_reset_due_to_keyword_phrase is initialized before try block
 
                     # Refined hour handling for "morning", "afternoon", "evening"
-                    if time_was_intended_by_user: # Use the existing heuristic flag
+                    if time_was_intended_by_user:
                         temp_last_message_lower = last_message.lower()
-                        hour_to_set = -1 # Flag to indicate no change initially
-                        keyword_used_for_hour_adjustment = "" # For logging
+                        hour_to_set = -1
+                        keyword_used_for_hour_adjustment = ""
+                        hour_val_str_for_log = None
 
-                        # Check for "noon"
                         if 'noon' in temp_last_message_lower:
                             hour_to_set = 12
+                            minute_reset_due_to_keyword_phrase = True
                             keyword_used_for_hour_adjustment = "noon"
-                        # Check for "midnight"
                         elif 'midnight' in temp_last_message_lower:
                             hour_to_set = 0
+                            minute_reset_due_to_keyword_phrase = True
                             keyword_used_for_hour_adjustment = "midnight"
                         else:
-                            # Regex to find "[morning/afternoon/evening/night] [hour_number]" or "[hour_number] [in the morning/afternoon/...]"
                             match = re.search(r'(morning|afternoon|evening|night)\s*(\d{1,2})|(\d{1,2})\s*(?:in\s*the\s*)?(morning|afternoon|evening|night)', temp_last_message_lower)
                             if match:
                                 keyword = None
-                                hour_val_str = None
-                                if match.group(1) and match.group(2): # (keyword) (digits)
+                                if match.group(1) and match.group(2):
                                     keyword = match.group(1)
-                                    hour_val_str = match.group(2)
-                                elif match.group(3) and match.group(4): # (digits) (keyword)
+                                    hour_val_str_for_log = match.group(2)
+                                elif match.group(3) and match.group(4):
                                     keyword = match.group(4)
-                                    hour_val_str = match.group(3)
+                                    hour_val_str_for_log = match.group(3)
 
                                 keyword_used_for_hour_adjustment = keyword if keyword else ""
 
-
-                                if keyword and hour_val_str:
+                                if keyword and hour_val_str_for_log:
                                     try:
-                                        hour_num = int(hour_val_str)
-                                        if 0 <= hour_num <= 12: # Allow 0 for midnight cases, 12 for noon/pm
+                                        hour_num = int(hour_val_str_for_log)
+                                        if 0 <= hour_num <= 12:
                                             if keyword == 'afternoon':
-                                                if 1 <= hour_num <= 5: hour_to_set = hour_num + 12 # afternoon 1-5 -> 13-17
-                                                elif hour_num == 12: hour_to_set = 12 # afternoon 12 -> 12 (noon)
+                                                if 1 <= hour_num <= 5: hour_to_set = hour_num + 12
+                                                elif hour_num == 12: hour_to_set = 12
                                             elif keyword == 'evening':
-                                                if 6 <= hour_num <= 9: hour_to_set = hour_num + 12 # evening 6-9 -> 18-21
-                                                elif 1 <= hour_num <= 5: hour_to_set = hour_num + 12 # evening 1-5 could also mean PM (e.g. 17:00)
-                                                elif hour_num == 12: hour_to_set = 12 # "evening 12" is likely noon
+                                                if 6 <= hour_num <= 9: hour_to_set = hour_num + 12
+                                                elif 1 <= hour_num <= 5: hour_to_set = hour_num + 12
+                                                elif hour_num == 12: hour_to_set = 12
                                             elif keyword == 'morning':
-                                                if 1 <= hour_num <= 11: hour_to_set = hour_num # morning 1-11 -> 1-11
-                                                elif hour_num == 12: hour_to_set = 0 # morning 12 (midnight)
+                                                if 1 <= hour_num <= 11: hour_to_set = hour_num
+                                                elif hour_num == 12: hour_to_set = 0
                                             elif keyword == 'night':
-                                                if 9 <= hour_num <= 11: hour_to_set = hour_num + 12 # night 9-11 -> 21-23
-                                                elif 1 <= hour_num <= 5: hour_to_set = hour_num # "1 at night" might be 1 AM
-                                                elif hour_num == 12: hour_to_set = 0 # night 12 (midnight)
-
-                                        elif 13 <= hour_num <= 23: # If user typed "afternoon 15", it's already 24h
+                                                if 9 <= hour_num <= 11: hour_to_set = hour_num + 12
+                                                elif 1 <= hour_num <= 5: hour_to_set = hour_num
+                                                elif hour_num == 12: hour_to_set = 0
+                                        elif 13 <= hour_num <= 23:
                                              hour_to_set = hour_num
+
+                                        if hour_to_set != -1 and not re.search(r'\d:\d{2}', last_message):
+                                            minute_reset_due_to_keyword_phrase = True
                                     except ValueError:
-                                        pass # Not a valid number
+                                        pass
 
-                        if hour_to_set != -1 and parsed_dt.hour != hour_to_set :
-                            logger.info(f"Adjusting hour based on '{keyword_used_for_hour_adjustment}': from {parsed_dt.hour} to {hour_to_set}.")
-                            parsed_dt = parsed_dt.replace(hour=hour_to_set)
+                        if hour_to_set != -1:
+                            should_update_parsed_dt = False
+                            if parsed_dt.hour != hour_to_set:
+                                should_update_parsed_dt = True
 
-                    if time_was_intended_by_user: # Allow overwrite (this outer if is from original logic)
-                        # Heuristic to set minutes to 00 if "11am" style input and minutes are non-zero
-                        if parsed_dt.minute != 0 and (re.search(r'\bam\b|\bpm\b', last_message, re.IGNORECASE)) and not (re.search(r'\d:\d{2}', last_message)):
-                             logger.info(f"Time heuristic: Input '{last_message}', parsed time {parsed_dt.time()}. Contains am/pm and no colon. Resetting minutes to 00.")
+                            if minute_reset_due_to_keyword_phrase and parsed_dt.minute != 0:
+                                should_update_parsed_dt = True
+
+                            if should_update_parsed_dt:
+                                log_message_parts = []
+                                current_parsed_time_for_log = parsed_dt.time()
+
+                                replace_kwargs = {}
+                                if parsed_dt.hour != hour_to_set:
+                                    log_message_parts.append(f"Adjusting hour based on '{keyword_used_for_hour_adjustment}' from {current_parsed_time_for_log.hour} to {hour_to_set}.")
+                                    replace_kwargs['hour'] = hour_to_set
+
+                                if minute_reset_due_to_keyword_phrase:
+                                    if current_parsed_time_for_log.minute != 0:
+                                        log_parts_for_minute_reset = f"Resetting minutes to 00 from {current_parsed_time_for_log.minute}"
+                                        if keyword_used_for_hour_adjustment:
+                                            log_parts_for_minute_reset += f" for '{keyword_used_for_hour_adjustment}{(' '+hour_val_str_for_log) if hour_val_str_for_log and keyword_used_for_hour_adjustment not in ['noon','midnight'] else ''}' phrase."
+                                        else:
+                                            log_parts_for_minute_reset += "."
+                                        log_message_parts.append(log_parts_for_minute_reset)
+                                    replace_kwargs['minute'] = 0
+                                    replace_kwargs['second'] = 0
+
+                                if log_message_parts:
+                                    logger.info(" ".join(log_message_parts))
+
+                                if replace_kwargs:
+                                    parsed_dt = parsed_dt.replace(**replace_kwargs)
+
+                    if time_was_intended_by_user: # Allow overwrite
+                        # Secondary heuristic to set minutes to 00 if "11am" style input (no specific keyword like afternoon)
+                        # and minutes are non-zero, and was not already reset by keyword phrase logic.
+                        if parsed_dt.minute != 0 and \
+                           not minute_reset_due_to_keyword_phrase and \
+                           (re.search(r'\bam\b|\bpm\b', last_message, re.IGNORECASE)) and \
+                           not (re.search(r'\d:\d{2}', last_message)):
+                             logger.info(f"Time heuristic (am/pm): Input '{last_message}', parsed time {parsed_dt.time()}. Contains am/pm and no colon. Resetting minutes to 00.")
                              parsed_dt = parsed_dt.replace(minute=0, second=0)
 
                         state["booking_info"]["time"] = parsed_dt.strftime("%H:%M")
@@ -839,3 +901,4 @@ class AppointmentAgent:
         
         return app
 
+[end of appointment_system/agent.py]
