@@ -103,19 +103,19 @@ class SpeechToTextHandler:
         except sd.PortAudioError as pae:
             print(f"STT Error: Microphone/audio device issue: {pae}")
             self._audio_stream_active = False
-            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue'):
+            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue):
                  self._buffer.put(None)
             return "ERROR_AUDIO_DEVICE"
         except Exception as e:
             print(f"STT Error: General STT service error: {e}")
             self._audio_stream_active = False
-            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue'):
+            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue):
                  self._buffer.put(None)
             return "ERROR_STT_SERVICE"
         finally:
             if self._audio_stream_active:
                  self._audio_stream_active = False
-                 if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue'):
+                 if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue):
                     self._buffer.put(None)
 
         if not final_transcript:
