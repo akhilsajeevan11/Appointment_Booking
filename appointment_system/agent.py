@@ -251,6 +251,11 @@ class AppointmentAgent:
         Has all required information: {has_all_info}
         
         Use the following format:
+
+        CRITICAL INSTRUCTION FOR RESPONSE FORMATTING:
+        Internal directives, such as 'Set next state to [STATE_NAME]' or 'Effective current purpose: [purpose]', MUST ONLY appear within a 'Thought:' block.
+        These directives MUST NEVER be included in the 'Final Answer:' text.
+        The 'Final Answer:' block must contain ONLY the direct conversational response to the user and nothing else. Adhere strictly to this.
         
         Question: the input question you must answer
         Thought: you should always think about what to do
@@ -258,8 +263,8 @@ class AppointmentAgent:
         Action Input: the input to the action (use JSON format for BookAppointment)
         Observation: the result of the action
         ... (this Thought/Action/Action Input/Observation can repeat N times)
-        Thought: I now know the final answer. If your Final Answer presents choices to the user (e.g., 'Do you want A or B?'), include in your Thought: 'I am presenting options, the user will now choose. Set next state to CS_AWAITING_RESPONSE_TO_OPTIONS.'
-        Final Answer: the final answer to the original input question
+        Thought: I now know the final answer. (Your thought process for arriving at the final answer, including any 'Set next state to...' or 'Effective current purpose:...' directives, goes here.)
+        Final Answer: (The user-facing response goes here. It must NOT contain any 'Set next state to...' or 'Effective current purpose:...' directives.)
         
         For booking appointments, use this JSON format:
         {{"name": "person name", "date": "YYYY-MM-DD", "time": "HH:MM", "purpose": "appointment purpose"}}
@@ -916,4 +921,4 @@ class AppointmentAgent:
         
         return app
 
-
+[end of appointment_system/agent.py]
