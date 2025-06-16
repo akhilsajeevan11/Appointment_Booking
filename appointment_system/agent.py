@@ -169,11 +169,12 @@ class AppointmentAgent:
             ),
             CS_CONFIRMING_BOOKING_INFO: (
                 "You are in the CONFIRMING_BOOKING_INFO state. All booking details have been collected. "
-                "The current details are: Name: {name}, Date: {date}, Time: {time}, Purpose: {purpose}. "
+                "The current details available to you are: Name: {name}, Date: {date}, Time: {time}, Purpose: {purpose}. "
                 "Your task is to CLEARLY LIST ALL these EXACT details back to the user and ask for their explicit confirmation. "
-                "Use the format: 'So, I have an appointment for {name} on {date} at {time} for {purpose}. Is that all correct?' "
+                "When stating the purpose, if the {purpose} value is empty or 'None', you should say 'Purpose: Not Specified'. Otherwise, use the provided {purpose}. " # New instruction line
+                "Your response to the user MUST use the format: 'So, I have an appointment for {name} on {date} at {time} for [stated purpose from above]. Is that all correct?' using the exact values provided for {name}, {date}, {time}, and the appropriately stated purpose. "
                 "In your Thought process, you MUST include 'Set next state to CS_AWAITING_FINAL_CONFIRMATION.' "
-                "Also, in your Thought, you MUST include 'Effective current purpose: {purpose}' using the EXACT purpose value provided above. Do not change or revert it to a generic one. "
+                "Also, in your Thought, you MUST include 'Effective current purpose: {purpose if purpose else 'None'}' using the EXACT value of {purpose} (or 'None' if it's empty) that was provided to you in this context. Do not change it, revert it to a generic one, or use the value of {name} for the purpose. "
                 "Do NOT use the BookAppointment tool in this current turn. Wait for the user's response."
             ),
             CS_AWAITING_FINAL_CONFIRMATION: (
@@ -650,15 +651,19 @@ class AppointmentAgent:
                                     parsed_dt = parsed_dt.replace(**replace_kwargs)
 
                     if time_was_intended_by_user: # Allow overwrite
-                        # Secondary heuristic to set minutes to 00 if "11am" style input (no specific keyword like afternoon)
-                        # and minutes are non-zero, and was not already reset by keyword phrase logic.
-                        if parsed_dt.minute != 0 and \
-                           not minute_reset_due_to_keyword_phrase and \
-                           (re.search(r'\bam\b|\bpm\b', last_message, re.IGNORECASE)) and \
-                           not (re.search(r'\d:\d{2}', last_message)):
-                             logger.info(f"Time heuristic (am/pm): Input '{last_message}', parsed time {parsed_dt.time()}. Contains am/pm and no colon. Resetting minutes to 00.")
-                             parsed_dt = parsed_dt.replace(minute=0, second=0)
+                        # (This is after the "noon", "midnight", "afternoon X", "evening X" hour adjustments)
+                        # The flag `minute_reset_due_to_keyword_phrase` would have been set true if the above logic also set minutes.
 
+                        # General heuristic for "X am/pm" if not already handled by more specific keyword phrase logic:
+                        if not minute_reset_due_to_keyword_phrase: # Only run if specific keywords didn't already handle minutes
+                            if (re.search(r'\bam\b', last_message, re.IGNORECASE) or re.search(r'\bpm\b', last_message, re.IGNORECASE)) and \
+                               not re.search(r'\d:\d{2}', last_message): # No HH:MM pattern in the message
+                                if parsed_dt.minute != 0 or parsed_dt.second != 0: # Only log and change if needed
+                                    logger.info(f"Time heuristic (am/pm without explicit colon): Input '{last_message}', initial parsed time {parsed_dt.time()}. Forcing minutes/seconds to 00.")
+                                    parsed_dt = parsed_dt.replace(minute=0, second=0)
+                                # else: minutes were already 00, no change needed by this specific rule.
+
+                        # The final setting of state["booking_info"]["time"] happens after all parsed_dt modifications
                         state["booking_info"]["time"] = parsed_dt.strftime("%H:%M")
                         logger.info(f"Extracted/Updated time: {state['booking_info']['time']}")
 
@@ -674,32 +679,63 @@ class AppointmentAgent:
                                            contains_time_keyword or
                                            contains_hour_pattern)
 
-            # Conditions for setting purpose:
-            # 1. Purpose is not already set.
-            # 2. The message was not primarily identified as date/time.
-            # 3. The message has a reasonable length for a purpose (e.g., more than 1 word, or more than 3 if not specific).
-            # 4. We are not in a state where purpose should not be updated (e.g., CS_CONFIRMING_BOOKING_INFO).
-            # 5. It's not a leftover from a booking offer affirmation where purpose was pre-filled.
+            # (This is after name extraction, and after the message_was_mainly_datetime flag is set)
 
-            # Allow purpose to be overwritten if new valid purpose is provided
+            # Determine if last_message is identical to the currently stored name
+            is_current_input_matching_stored_name = False
+            if state["booking_info"]["name"] is not None and last_message == state["booking_info"]["name"]:
+                is_current_input_matching_stored_name = True
+
+            # Check if the current stored purpose is generic
+            current_stored_purpose_is_generic = False
+            if state["booking_info"]["purpose"]:
+                generic_phrases_for_purpose = ["help", "process", "new here", "i dont know", "assist", "start", "what i want to do", "book an appointment"]
+                # Consider a purpose generic if it contains these phrases and is relatively short, or is exactly "book an appointment"
+                if state["booking_info"]["purpose"].lower() == "book an appointment" or \
+                   (any(phrase in state["booking_info"]["purpose"].lower() for phrase in generic_phrases_for_purpose) and len(state["booking_info"]["purpose"].split()) <= 5): # Tuned length
+                    current_stored_purpose_is_generic = True
+
+            # Determine if purpose should be updated based on current input
+            # Allow update if:
+            # 1. Current input is not mainly date/time.
+            # 2. Current input is not identical to the stored name.
+            # 3. Current input has some content (more than 0 words, or allow 1 if it's a correction).
+            # 4. Not in a state where we shouldn't be changing purpose (e.g. CS_CONFIRMING_BOOKING_INFO itself - LLM handles purpose there).
+            # 5. Not a direct result of affirming a booking offer that had a pre-filled purpose.
+            # 6. The slot is open for update (current purpose is None, or generic, or we are in a correction flow state).
+
+            should_try_to_extract_purpose_from_last_message = False
             if not message_was_mainly_datetime and \
-               len(last_message.split()) > 1 and \
+               not is_current_input_matching_stored_name and \
+               len(last_message.split()) > 0 and \
                current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO and \
-               not (made_booking_offer and user_affirmed and potential_purpose_from_offer):
+               not (made_booking_offer and user_affirmed and potential_purpose_from_offer): # If offer had purpose, it's already set
 
-                # Further refine: avoid very short messages that might just be affirmations/negations if no other context
-                # Allow overwrite even for short messages if in CS_AWAITING_FINAL_CONFIRMATION, as it might be a correction.
-                if len(last_message.split()) < 3 and \
-                   last_message.lower() in ["yes", "no", "ok", "okay", "sure", "cancel"] and \
-                   not state.get("conversation_state") == CS_AWAITING_FINAL_CONFIRMATION:
-                    logger.info(f"Skipping purpose extraction for short affirmation/negation: '{last_message}' (not in correction flow)")
-                else:
+                # Conditions under which the existing purpose can be overwritten by last_message
+                if state["booking_info"]["purpose"] is None or \
+                   current_stored_purpose_is_generic or \
+                   state.get("conversation_state") == CS_AWAITING_FINAL_CONFIRMATION: # Correction context
+                    should_try_to_extract_purpose_from_last_message = True
+
+            if should_try_to_extract_purpose_from_last_message:
+                # Avoid short affirmations/negations unless in correction mode (handled by state check above)
+                is_short_affirm_negate = len(last_message.split()) < 3 and last_message.lower() in ["yes", "no", "ok", "okay", "sure", "cancel"]
+
+                if is_short_affirm_negate and state.get("conversation_state") != CS_AWAITING_FINAL_CONFIRMATION:
+                    logger.info(f"Skipping purpose extraction for short affirmation/negation: '{last_message}'")
+                elif state["booking_info"]["purpose"] != last_message: # Only update if different
+                    logger.info(f"Extracted/Updated booking_info.purpose from '{last_message}'. Old value was: '{state['booking_info']['purpose']}'.")
                     state["booking_info"]["purpose"] = last_message
-                    logger.info(f"Extracted purpose: {state['booking_info']['purpose']}")
-            elif not message_was_mainly_datetime and state["booking_info"]["purpose"] is not None :
-                 logger.info(f"Purpose already set to '{state['booking_info']['purpose']}', not overwriting with '{last_message}'.")
+                elif state["booking_info"]["purpose"] == last_message: # No change needed
+                     logger.info(f"Input '{last_message}' considered for purpose, but it matches the existing purpose. No change to purpose.")
+
+            # Logging for why purpose might not have been extracted from last_message
+            if not should_try_to_extract_purpose_from_last_message and not message_was_mainly_datetime and not is_current_input_matching_stored_name:
+                logger.info(f"Skipping purpose update for '{last_message}'. Current purpose '{state['booking_info']['purpose']}' is specific and not in correction mode.")
             elif message_was_mainly_datetime:
-                 logger.info(f"Skipping purpose extraction for '{last_message}' as it was identified as mainly date/time.")
+                logger.info(f"Skipping purpose extraction for '{last_message}' as it was mainly date/time.")
+            elif is_current_input_matching_stored_name:
+                logger.info(f"Skipping purpose extraction for '{last_message}' as it matches the stored name.")
             
             has_all_info = all(state["booking_info"].values())
 
@@ -920,3 +956,5 @@ class AppointmentAgent:
         app = workflow.compile()
         
         return app
+
+[end of appointment_system/agent.py]

@@ -909,6 +909,59 @@ class TestAgentLogic(unittest.TestCase):
 
         self.assertEqual(self.mock_llm_instance.invoke.call_count, 4)
 
+    def test_extract_specific_time_date_combo_from_log(self):
+        mock_now = dt(2024, 6, 15, 10, 53) # June 15, 2024
+        user_input = "11am july 20"
+        expected_changes = {"date": "2024-07-20", "time": "11:00"}
+        self._run_datetime_extraction_test(user_input, mock_now, expected_changes)
+
+    def test_name_input_does_not_become_purpose(self):
+        user_provides_name = "Lijo Jose"
+
+        expected_llm_response = "Thought: Name 'Lijo Jose' is set. Purpose is not set. Date is missing. Ask for date first. Effective current purpose: None.\nFinal Answer: Thanks, Lijo Jose! What date would you like for your appointment (YYYY-MM-DD)?"
+        self.mock_llm_instance.invoke.return_value = MagicMock(content=expected_llm_response)
+
+        initial_state = {
+            "messages": [{"role": "user", "content": user_provides_name}],
+            "booking_info": {"name": None, "date": None, "time": None, "purpose": None},
+            "conversation_state": CS_GENERAL_INQUIRY,
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        }
+
+        final_state = self.graph.invoke(initial_state)
+
+        self.assertEqual(final_state['booking_info']['name'], user_provides_name, "Name was not extracted correctly.")
+        self.assertIsNone(final_state['booking_info']['purpose'],
+                          f"Purpose should be None, but was '{final_state['booking_info']['purpose']}'. Name should not become purpose.")
+        self.assertIn("What date would you like", final_state['current_step'])
+        self.assertEqual(final_state['conversation_state'], CS_COLLECTING_BOOKING_INFO)
+
+    def test_confirmation_message_with_none_purpose(self):
+        booking_info_no_purpose = {
+            "name": "Sachi M",
+            "date": "2024-10-05",
+            "time": "15:00",
+            "purpose": None
+        }
+
+        state_entering_confirmation = {
+            "messages": [{"role": "user", "content": "Last detail provided"}],
+            "booking_info": booking_info_no_purpose,
+            "conversation_state": CS_COLLECTING_BOOKING_INFO,
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        }
+
+        expected_confirmation_message = "So, I have an appointment for Sachi M on 2024-10-05 at 15:00 for Purpose: Not Specified. Is that all correct?"
+        self.mock_llm_instance.invoke.return_value = MagicMock(
+            content=f"Thought: Confirming details. Purpose is None, so state 'Not Specified'. Effective current purpose: None. Set next state to CS_AWAITING_FINAL_CONFIRMATION.\nFinal Answer: {expected_confirmation_message}"
+        )
+
+        final_state = self.graph.invoke(state_entering_confirmation)
+
+        self.assertIn("Purpose: Not Specified", final_state['current_step'])
+        self.assertNotIn("for None.", final_state['current_step'])
+        self.assertEqual(final_state['conversation_state'], CS_AWAITING_FINAL_CONFIRMATION)
+
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
     # Ensure Python can find the appointment_system package.
