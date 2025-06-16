@@ -920,5 +920,3 @@ class AppointmentAgent:
         app = workflow.compile()
         
         return app
-
-[end of appointment_system/agent.py]
