@@ -113,13 +113,13 @@ class SpeechToTextHandler:
             print(f"STT Error: Microphone/audio device issue: {pae}")
             self._audio_stream_active = False
             # Ensure generator is stopped if it was started
-            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue'):
+            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue):
                  self._buffer.put(None)
             return "ERROR_AUDIO_DEVICE"
         except Exception as e: # Catch other exceptions, including Google API errors
             print(f"STT Error: General STT service error: {e}")
             self._audio_stream_active = False
-            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue'):
+            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue):
                  self._buffer.put(None)
             return "ERROR_STT_SERVICE"
         finally:
@@ -128,7 +128,7 @@ class SpeechToTextHandler:
             # and the generator is signalled to stop.
             if self._audio_stream_active: # If stream was active and didn't stop cleanly
                  self._audio_stream_active = False
-                 if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue'):
+                 if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue):
                     self._buffer.put(None) # Signal generator to stop
 
         if not final_transcript:
