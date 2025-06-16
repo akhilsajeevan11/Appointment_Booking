@@ -962,6 +962,66 @@ class TestAgentLogic(unittest.TestCase):
         self.assertNotIn("for None.", final_state['current_step'])
         self.assertEqual(final_state['conversation_state'], CS_AWAITING_FINAL_CONFIRMATION)
 
+    def test_affirm_in_final_confirmation_preserves_purpose(self):
+        # Setup: Agent has all correct details and has just asked for final confirmation.
+        # The (conceptual) previous turn's LLM (from CS_CONFIRMING_BOOKING_INFO) would have said:
+        # "So, I have an appointment for Lijo Jose on 2026-06-11 at 11:00 for Consultation for Fever. Is that all correct?"
+        # And its thought would have included "Set next state to CS_AWAITING_FINAL_CONFIRMATION."
+
+        user_name = "Lijo Jose"
+        correct_date = "2026-06-11"
+        correct_time = "11:00"
+        specific_purpose = "Consultation for Fever"
+
+        initial_booking_info_for_this_turn = {
+            "name": user_name,
+            "date": correct_date,
+            "time": correct_time,
+            "purpose": specific_purpose # Crucially, this is the correct specific purpose
+        }
+
+        # State as user input "yes" is being processed.
+        # The agent's prior state (after asking for confirmation) was CS_AWAITING_FINAL_CONFIRMATION.
+        state_before_processing_yes = {
+            "messages": [
+                {"role": "assistant", "content": "So, I have an appointment for Lijo Jose on 2026-06-11 at 11:00 for Consultation for Fever. Is that all correct?"},
+                {"role": "user", "content": "yes"}
+            ],
+            "booking_info": initial_booking_info_for_this_turn,
+            "conversation_state": CS_AWAITING_FINAL_CONFIRMATION, # This is key
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        }
+
+        # LLM mock for this turn (when in CS_AWAITING_FINAL_CONFIRMATION and user says "yes")
+        # It should decide to call BookAppointment with the existing, correct details.
+        self.mock_book_appointment_tool.return_value = "Appointment booked successfully!"
+        expected_llm_action_input = {
+            "name": user_name, "date": correct_date, "time": correct_time, "purpose": specific_purpose
+        }
+        llm_calls_bookappointment_content = (
+            f"Thought: User confirmed all details ({user_name}, {correct_date}, {correct_time}, {specific_purpose}). I will now book the appointment.\n"
+            f"Effective current purpose: {specific_purpose}\n" # LLM should confirm the correct purpose
+            f"Action: BookAppointment\nAction Input: {json.dumps(expected_llm_action_input)}"
+        )
+        self.mock_llm_instance.invoke.return_value = MagicMock(content=llm_calls_bookappointment_content)
+
+        # Invoke the graph
+        final_state = self.graph.invoke(state_before_processing_yes)
+
+        # 1. Verify LLM was called once for this "yes" turn.
+        self.mock_llm_instance.invoke.assert_called_once()
+
+        # 2. Verify booking_info.purpose in the *final state* is still the specific_purpose.
+        #    This confirms the Python logic didn't change it to "yes".
+        self.assertEqual(final_state['booking_info']['purpose'], specific_purpose,
+                         f"Purpose in booking_info should remain '{specific_purpose}', but was '{final_state['booking_info']['purpose']}'.")
+
+        # 3. Verify BookAppointment tool was called with the correct specific_purpose.
+        self.mock_book_appointment_tool.assert_called_once_with(expected_llm_action_input)
+
+        # 4. Check for success message in agent's response history
+        self.assertTrue(any("Appointment booked successfully!" in msg['content'] for msg in final_state['messages'] if msg['role'] == 'assistant'))
+
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
     # Ensure Python can find the appointment_system package.

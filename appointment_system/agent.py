@@ -679,63 +679,99 @@ class AppointmentAgent:
                                            contains_time_keyword or
                                            contains_hour_pattern)
 
-            # (This is after name extraction, and after the message_was_mainly_datetime flag is set)
+            # (This section assumes message_was_mainly_datetime, is_current_input_matching_stored_name,
+            #  current_stored_purpose_is_generic, user_affirmed, made_booking_offer, potential_purpose_from_offer,
+            #  and current_conversation_state_for_prompt have been determined earlier in call_agent)
 
             # Determine if last_message is identical to the currently stored name
-            is_current_input_matching_stored_name = False
+            is_current_input_matching_stored_name = False # Ensure this is initialized before use
             if state["booking_info"]["name"] is not None and last_message == state["booking_info"]["name"]:
                 is_current_input_matching_stored_name = True
 
             # Check if the current stored purpose is generic
-            current_stored_purpose_is_generic = False
+            current_stored_purpose_is_generic = False # Initialize/Re-evaluate based on current booking_info.purpose
             if state["booking_info"]["purpose"]:
                 generic_phrases_for_purpose = ["help", "process", "new here", "i dont know", "assist", "start", "what i want to do", "book an appointment"]
-                # Consider a purpose generic if it contains these phrases and is relatively short, or is exactly "book an appointment"
                 if state["booking_info"]["purpose"].lower() == "book an appointment" or \
-                   (any(phrase in state["booking_info"]["purpose"].lower() for phrase in generic_phrases_for_purpose) and len(state["booking_info"]["purpose"].split()) <= 5): # Tuned length
+                   (any(phrase in state["booking_info"]["purpose"].lower() for phrase in generic_phrases_for_purpose) and len(state["booking_info"]["purpose"].split()) <= 5):
                     current_stored_purpose_is_generic = True
 
-            # Determine if purpose should be updated based on current input
-            # Allow update if:
-            # 1. Current input is not mainly date/time.
-            # 2. Current input is not identical to the stored name.
-            # 3. Current input has some content (more than 0 words, or allow 1 if it's a correction).
-            # 4. Not in a state where we shouldn't be changing purpose (e.g. CS_CONFIRMING_BOOKING_INFO itself - LLM handles purpose there).
-            # 5. Not a direct result of affirming a booking offer that had a pre-filled purpose.
-            # 6. The slot is open for update (current purpose is None, or generic, or we are in a correction flow state).
+            # Determine if we should attempt to extract/update purpose from last_message
+            attempt_purpose_extraction_from_last_message = True
 
-            should_try_to_extract_purpose_from_last_message = False
-            if not message_was_mainly_datetime and \
-               not is_current_input_matching_stored_name and \
-               len(last_message.split()) > 0 and \
-               current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO and \
-               not (made_booking_offer and user_affirmed and potential_purpose_from_offer): # If offer had purpose, it's already set
-
-                # Conditions under which the existing purpose can be overwritten by last_message
-                if state["booking_info"]["purpose"] is None or \
-                   current_stored_purpose_is_generic or \
-                   state.get("conversation_state") == CS_AWAITING_FINAL_CONFIRMATION: # Correction context
-                    should_try_to_extract_purpose_from_last_message = True
-
-            if should_try_to_extract_purpose_from_last_message:
-                # Avoid short affirmations/negations unless in correction mode (handled by state check above)
-                is_short_affirm_negate = len(last_message.split()) < 3 and last_message.lower() in ["yes", "no", "ok", "okay", "sure", "cancel"]
-
-                if is_short_affirm_negate and state.get("conversation_state") != CS_AWAITING_FINAL_CONFIRMATION:
-                    logger.info(f"Skipping purpose extraction for short affirmation/negation: '{last_message}'")
-                elif state["booking_info"]["purpose"] != last_message: # Only update if different
-                    logger.info(f"Extracted/Updated booking_info.purpose from '{last_message}'. Old value was: '{state['booking_info']['purpose']}'.")
-                    state["booking_info"]["purpose"] = last_message
-                elif state["booking_info"]["purpose"] == last_message: # No change needed
-                     logger.info(f"Input '{last_message}' considered for purpose, but it matches the existing purpose. No change to purpose.")
-
-            # Logging for why purpose might not have been extracted from last_message
-            if not should_try_to_extract_purpose_from_last_message and not message_was_mainly_datetime and not is_current_input_matching_stored_name:
-                logger.info(f"Skipping purpose update for '{last_message}'. Current purpose '{state['booking_info']['purpose']}' is specific and not in correction mode.")
-            elif message_was_mainly_datetime:
-                logger.info(f"Skipping purpose extraction for '{last_message}' as it was mainly date/time.")
+            if message_was_mainly_datetime:
+                attempt_purpose_extraction_from_last_message = False
+                logger.info(f"Purpose Extraction: Skipped. Message '{last_message}' was mainly date/time.")
             elif is_current_input_matching_stored_name:
-                logger.info(f"Skipping purpose extraction for '{last_message}' as it matches the stored name.")
+                attempt_purpose_extraction_from_last_message = False
+                logger.info(f"Purpose Extraction: Skipped. Message '{last_message}' matches stored name.")
+            # Do not extract purpose if LLM is currently in CS_CONFIRMING_BOOKING_INFO (it handles purpose display there)
+            # or if purpose was just set via an affirmed booking offer.
+            elif current_conversation_state_for_prompt == CS_CONFIRMING_BOOKING_INFO or \
+                 (made_booking_offer and user_affirmed and potential_purpose_from_offer):
+                attempt_purpose_extraction_from_last_message = False
+                logger.info(f"Purpose Extraction: Skipped due to current state ({current_conversation_state_for_prompt}) or affirmed booking offer.")
+
+            # CRITICAL FIX: If user is affirming in CS_AWAITING_FINAL_CONFIRMATION, their input ("yes") is NOT a new purpose.
+            if state.get("conversation_state") == CS_AWAITING_FINAL_CONFIRMATION and user_affirmed:
+                attempt_purpose_extraction_from_last_message = False
+                logger.info(f"Purpose Extraction: Skipped. User affirmed ('{last_message}') in CS_AWAITING_FINAL_CONFIRMATION. Existing purpose preserved.")
+
+            if attempt_purpose_extraction_from_last_message:
+                # Conditions under which the existing purpose can be overwritten by last_message
+                # Allow overwrite if current purpose is None, or generic, or if this is a correction turn.
+                # A "correction turn" is when prior state was CS_AWAITING_FINAL_CONFIRMATION and user did NOT affirm.
+                is_correction_turn = (state.get("conversation_state") == CS_AWAITING_FINAL_CONFIRMATION and not user_affirmed)
+
+                # Re-check current_stored_purpose_is_generic as it might not have been set if purpose was None initially
+                # This was already done above, so this re-evaluation is not strictly necessary here unless state["booking_info"]["purpose"] could change between that block and this one.
+                # For safety, ensure it's up-to-date if logic allows state["booking_info"]["purpose"] to change before this point.
+                if state["booking_info"]["purpose"]: # Re-evaluate if purpose might have changed
+                    # Ensure generic_phrases_for_purpose is defined here or accessible
+                    generic_phrases_for_purpose = ["help", "process", "new here", "i dont know", "assist", "start", "what i want to do", "book an appointment"]
+                    if state["booking_info"]["purpose"].lower() == "book an appointment" or \
+                       (any(phrase in state["booking_info"]["purpose"].lower() for phrase in generic_phrases_for_purpose) and len(state["booking_info"]["purpose"].split()) <= 5):
+                        current_stored_purpose_is_generic = True
+                    else:
+                        current_stored_purpose_is_generic = False
+                else:
+                    current_stored_purpose_is_generic = False # if purpose is None, it's not "generic" in a string sense but allows overwrite
+
+                allow_overwrite = (state["booking_info"]["purpose"] is None or \
+                                   current_stored_purpose_is_generic or \
+                                   is_correction_turn)
+
+                if not allow_overwrite:
+                    logger.info(f"Purpose Extraction: Skipped update for '{last_message}'. Current purpose '{state['booking_info']['purpose']}' is specific and not in correction mode or slot not open.")
+                    attempt_purpose_extraction_from_last_message = False # Final check
+
+            if attempt_purpose_extraction_from_last_message:
+                # Avoid very short, common single-word affirmations/negations from becoming a purpose,
+                # unless it's a correction turn where any input might be the correction.
+                is_single_common_affirm_negate_word = len(last_message.split()) == 1 and \
+                                                     last_message.lower() in ["yes", "no", "ok", "okay", "sure", "cancel", "yep", "nope"]
+
+                if is_single_common_affirm_negate_word and not (state.get("conversation_state") == CS_AWAITING_FINAL_CONFIRMATION and not user_affirmed):
+                    logger.info(f"Purpose Extraction: Skipped. Message '{last_message}' is a single common affirm/negate word and not a valid purpose in this context.")
+                elif state["booking_info"]["purpose"] != last_message: # Only update if different, to avoid redundant logs
+                    logger.info(f"Purpose Extraction: Updating booking_info.purpose from '{last_message}'. Old value was: '{state['booking_info']['purpose']}'.")
+                    state["booking_info"]["purpose"] = last_message
+                elif state["booking_info"]["purpose"] == last_message:
+                     logger.info(f"Purpose Extraction: Input '{last_message}' considered for purpose, but it matches the existing purpose. No change.")
+
+            # Ensure booking_info.purpose is not None if it was a generic "book an appointment" and nothing more specific was found
+            # This should only run if attempt_purpose_extraction_from_last_message was false for the original last_message,
+            # but the original last_message did contain "book an appointment" and purpose remains None.
+            if state["booking_info"]["purpose"] is None and \
+               "book an appointment" in last_message.lower() and \
+               not message_was_mainly_datetime and \
+               not is_current_input_matching_stored_name:
+                 # Check if last_message itself would have been a valid purpose if not for other conditions.
+                 # Avoid setting it if it's a very short phrase like "book an appointment yes" which got filtered.
+                 if len(last_message.split()) > 1 : # Basic check to avoid just "yes" etc.
+                    if state["booking_info"]["purpose"] != last_message: # check to prevent re-logging if it was just set
+                        logger.info(f"Purpose Extraction: Setting generic purpose from input '{last_message}' as current purpose is None.")
+                        state["booking_info"]["purpose"] = last_message
             
             has_all_info = all(state["booking_info"].values())
 
@@ -957,4 +993,4 @@ class AppointmentAgent:
         
         return app
 
-
+[end of appointment_system/agent.py]
