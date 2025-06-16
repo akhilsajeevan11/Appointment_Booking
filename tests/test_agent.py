@@ -794,6 +794,121 @@ class TestAgentLogic(unittest.TestCase):
         #    and LLM didn't signal a change from it in this mocked response).
         self.assertEqual(final_state['conversation_state'], CS_COLLECTING_BOOKING_INFO)
 
+    def test_correction_during_final_confirmation_updates_and_reconfirms(self):
+        # Scenario:
+        # 1. Agent has all info (Name A, Date A, Time A_initial, Purpose A) and asks for confirmation.
+        #    (Agent is in CS_CONFIRMING_BOOKING_INFO, then transitions to CS_AWAITING_FINAL_CONFIRMATION)
+        # 2. User: "no, the time is actually 11am" (provides correction)
+        # 3. Agent (LLM mock): Should acknowledge, re-parse. Python logic updates booking_info.time to "11:00".
+        #    Agent then transitions back to CS_CONFIRMING_BOOKING_INFO.
+        # 4. Agent (LLM mock): Re-confirms ALL details, now with Time A_corrected ("11:00").
+        #    Transitions again to CS_AWAITING_FINAL_CONFIRMATION.
+        # 5. User: "yes"
+        # 6. Agent (LLM mock): Calls BookAppointment with corrected time.
+
+        initial_booking_info = {"name": "TestUser", "date": "2024-09-25", "time": "14:30", "purpose": "Dental Checkup"}
+        corrected_time = "11:00" # User wants to change to 11am
+
+        # This will be the booking_info after user correction and Python re-parsing
+        updated_booking_info_after_correction = initial_booking_info.copy()
+        updated_booking_info_after_correction["time"] = corrected_time
+
+        # --- Mock LLM Responses ---
+        # 1. LLM asks for initial confirmation
+        llm_response_ask_confirmation_content = (
+            f"Thought: All details collected. Confirm them. Effective current purpose: {initial_booking_info['purpose']}. "
+            f"Set next state to CS_AWAITING_FINAL_CONFIRMATION.\n"
+            f"Final Answer: So, I have an appointment for {initial_booking_info['name']} on {initial_booking_info['date']} "
+            f"at {initial_booking_info['time']} for {initial_booking_info['purpose']}. Is that all correct?"
+        )
+
+        # 2. LLM acknowledges correction (after user says "no, the time is 11am")
+        #    Prompt for CS_AWAITING_FINAL_CONFIRMATION (non-affirmative branch) guides this.
+        llm_response_acknowledge_correction_content = (
+            "Thought: User input is not 'yes', treating as correction. System will re-parse this input. "
+            "I must then re-confirm. Set next state to CS_CONFIRMING_BOOKING_INFO.\n"
+            "Final Answer: Okay, let me update that for you."
+        )
+
+        # 3. LLM re-confirms with updated details
+        #    This LLM call is made when state is CS_CONFIRMING_BOOKING_INFO and booking_info is updated.
+        llm_response_reconfirm_details_content = (
+            f"Thought: All details (now updated with time {corrected_time}) present. Confirm them. Effective current purpose: {updated_booking_info_after_correction['purpose']}. "
+            f"Set next state to CS_AWAITING_FINAL_CONFIRMATION.\n"
+            f"Final Answer: So, I have an appointment for {updated_booking_info_after_correction['name']} on {updated_booking_info_after_correction['date']} "
+            f"at {updated_booking_info_after_correction['time']} for {updated_booking_info_after_correction['purpose']}. Is that all correct?"
+        )
+
+        # 4. LLM books appointment after user confirms updated details
+        self.mock_book_appointment_tool.return_value = "Appointment booked successfully!" # Setup mock for tool
+        llm_response_book_appointment_content = (
+            f"Thought: User confirmed updated details. Book it. Effective current purpose: {updated_booking_info_after_correction['purpose']}.\n"
+            f"Action: BookAppointment\nAction Input: {json.dumps(updated_booking_info_after_correction)}"
+        )
+
+        self.mock_llm_instance.invoke.side_effect = [
+            MagicMock(content=llm_response_ask_confirmation_content),
+            MagicMock(content=llm_response_acknowledge_correction_content),
+            MagicMock(content=llm_response_reconfirm_details_content),
+            MagicMock(content=llm_response_book_appointment_content)
+        ]
+
+        # --- Simulate Conversation Flow ---
+
+        # Invoke 1: Agent asks for initial confirmation
+        current_messages = [{"role": "user", "content": "Details were just collected"}] # Placeholder history
+        current_booking_info = initial_booking_info.copy()
+        # Agent's call_agent logic will transition from CS_COLLECTING_BOOKING_INFO to CS_CONFIRMING_BOOKING_INFO for the LLM prompt
+        state_after_ask_confirmation = self.graph.invoke({
+            "messages": current_messages, "booking_info": current_booking_info,
+            "conversation_state": CS_COLLECTING_BOOKING_INFO,
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        })
+        self.assertIn(initial_booking_info['time'], state_after_ask_confirmation['current_step'])
+        self.assertEqual(state_after_ask_confirmation['conversation_state'], CS_AWAITING_FINAL_CONFIRMATION)
+        current_messages = state_after_ask_confirmation['messages']
+        current_booking_info = state_after_ask_confirmation['booking_info']
+
+        # Invoke 2: User provides correction "no, the time is actually 11am"
+        user_correction_input = "no, the time is actually 11am"
+        current_messages.append({"role": "user", "content": user_correction_input})
+
+        state_after_ack_correction = self.graph.invoke({
+            "messages": current_messages, "booking_info": current_booking_info,
+            "conversation_state": CS_AWAITING_FINAL_CONFIRMATION,
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        })
+        self.assertIn("Okay, let me update", state_after_ack_correction['current_step'])
+        self.assertEqual(state_after_ack_correction['booking_info']['time'], corrected_time, "Time should be updated in booking_info by Python logic")
+        self.assertEqual(state_after_ack_correction['conversation_state'], CS_CONFIRMING_BOOKING_INFO)
+        current_messages = state_after_ack_correction['messages']
+        current_booking_info = state_after_ack_correction['booking_info']
+
+        # Invoke 3: Agent re-confirms with updated time
+        state_after_reconfirm = self.graph.invoke({
+            "messages": current_messages, "booking_info": current_booking_info,
+            "conversation_state": CS_CONFIRMING_BOOKING_INFO,
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        })
+        self.assertIn(f"at {corrected_time} for", state_after_reconfirm['current_step'], "Confirmation should use new time")
+        self.assertIn(initial_booking_info['name'], state_after_reconfirm['current_step'])
+        self.assertEqual(state_after_reconfirm['conversation_state'], CS_AWAITING_FINAL_CONFIRMATION)
+        current_messages = state_after_reconfirm['messages']
+        current_booking_info = state_after_reconfirm['booking_info']
+
+        # Invoke 4: User says "yes" to updated details
+        user_final_affirmation = "yes, that's perfect now"
+        current_messages.append({"role": "user", "content": user_final_affirmation})
+        final_state = self.graph.invoke({
+            "messages": current_messages, "booking_info": current_booking_info,
+            "conversation_state": CS_AWAITING_FINAL_CONFIRMATION,
+            "last_action": None, "action_count": 0, "current_step": "", "next": "agent"
+        })
+        self.mock_book_appointment_tool.assert_called_once_with(updated_booking_info_after_correction)
+        self.assertTrue(any("Appointment booked successfully!" in msg['content'] for msg in final_state['messages'] if msg['role'] == 'assistant'))
+
+        self.assertEqual(self.mock_llm_instance.invoke.call_count, 4)
+
 if __name__ == '__main__':
     # This allows running the tests directly if the subtask environment supports it
     # Ensure Python can find the appointment_system package.

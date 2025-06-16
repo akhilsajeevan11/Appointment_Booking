@@ -120,7 +120,13 @@ class AppointmentAgent:
                 "For less broad 'new user' queries, or if they respond to the overview by asking for more specific help, you can then offer to explain the booking process in detail, or show examples of appointment purposes (consider GetPurposeExamples tool if they seem broadly unsure of the *type* of appointment they need). "
                 "Example for a new user who seems to have some idea: 'Since you're new, I can quickly explain how booking works, or I can show you some example appointment reasons. What would be more helpful for you right now?' "
 
-                "HANDLING EXPLICIT BOOKING INTENT: If the user's current input ({input}) clearly states 'I want to book an appointment', 'I need to schedule something', or similar, and you are in this GENERAL_INQUIRY state: Your main goal is to transition to actual booking. If {booking_info[purpose]} is not yet set or is very generic (like 'i want to book an appointment' itself), try to elicit a more specific purpose if possible (e.g., 'Okay, I can help with that! What is the appointment for?'), or if the context implies a purpose, use that. Then, move to collect the first missing piece of information (usually name). Your thought process should aim to 'Set next state to CS_COLLECTING_BOOKING_INFO'. Avoid using `HandleGreeting` or `GetPurposeExamples` when a clear booking intent is expressed."
+                "HANDLING EXPLICIT BOOKING INTENT: If the user's current input ({input}) clearly states 'I want to book an appointment', 'I need to book an appointment', 'book an appointment please', 'schedule an appointment', or very similar direct booking requests, and you are in this GENERAL_INQUIRY state: "
+                "Your main goal is to transition to actual booking. Using `HandleGreeting` or `GetPurposeExamples` at this point is INCORRECT and unhelpful. "
+                "Instead, your thought process MUST be: "
+                "1. Identify if a specific purpose is already known from {history} or {purpose}. If not, or if the current {purpose} is just the generic phrase like 'book an appointment', then your immediate `Final Answer` should be to ask 'Okay, I can help with that! What is this appointment for?' "
+                "2. If a specific purpose *is* known (e.g., from prior turns or it was part of the user's request like 'book a dental checkup'), then your `Final Answer` should be to ask for the first missing piece of information (usually the name, e.g., 'Okay, for your dental checkup, what is your name?'). "
+                "3. In either case, your thought MUST include 'Set next state to CS_COLLECTING_BOOKING_INFO.' to proceed with collecting all details. "
+                "Remember: DO NOT use `HandleGreeting` or `GetPurposeExamples` if the user explicitly states they want to book an appointment."
 
                 "SPECIAL CASE for name confirmation: If your last message asked the user to confirm a name stored in {booking_info[name]} AND to provide other details (like date/time), "
                 "AND the {booking_info[name]} looks like a placeholder phrase (e.g., contains 'new here', 'help', 'assist', 'process', or is longer than 4 words) rather than a real name, "
@@ -171,15 +177,14 @@ class AppointmentAgent:
                 "Do NOT use the BookAppointment tool in this current turn. Wait for the user's response."
             ),
             CS_AWAITING_FINAL_CONFIRMATION: (
-                "You are in the AWAITING_FINAL_CONFIRMATION state. The user was just asked to confirm all appointment details. "
-                "Their current input ({input}) is their response to that confirmation request. "
+                "You are in the AWAITING_FINAL_CONFIRMATION state. The user was just asked to confirm all appointment details ({name}, {date}, {time}, {purpose}). "
+                "Their current input ({input}) is their response. "
                 "If the user's input is a clear affirmation (e.g., 'yes', 'correct', 'perfect', 'proceed'): "
-                "Your Thought process should be: 'User confirmed all details. I will now book the appointment.' "
-                "Then, use the BookAppointment tool with the details from {booking_info}. "
-                "If the user's input is negative or suggests a change (e.g., 'no', 'that date is wrong', 'change the time'): "
-                "Your Thought process should be: 'User wants to change details. I need to ask what to change and go back to collecting info.' "
-                "Your Final Answer should ask the user what specific information they'd like to correct or change. For example: 'Okay, what information isn't correct or what would you like to change?' "
-                "In your Thought, also include: 'Set next state to CS_COLLECTING_BOOKING_INFO.' "
+                "  Your Thought process should be: 'User confirmed all details. I will now book the appointment.' "
+                "  Then, use the BookAppointment tool with the current booking details ({name}, {date}, {time}, {purpose}). "
+                "If the user's input is NOT a clear affirmation (e.g., 'no', 'that date is wrong', 'change the time to 11am', or just '11am'): "
+                "  Your Thought process should be: 'User input is not a clear 'yes', treating as a correction. The system will re-parse this input for any new details. I must then re-confirm the potentially updated full set of details. Set next state to CS_CONFIRMING_BOOKING_INFO.' "
+                "  Your Final Answer should be a brief acknowledgement, like: 'Okay, let me update that for you.' (The system will handle re-parsing and re-confirmation). "
             ),
             CS_VIEWING_APPOINTMENTS: (
                 "You are in the VIEWING_APPOINTMENTS state. The user wants to see their appointments. "
@@ -456,34 +461,33 @@ class AppointmentAgent:
 
             if current_conversation_state_for_prompt in [CS_INITIAL_GREETING, CS_COLLECTING_BOOKING_INFO, CS_GENERAL_INQUIRY, CS_CONFIRMING_BOOKING_INFO] or \
                (made_booking_offer and user_affirmed):
-                # Attempt to extract name if not already set
-                if state["booking_info"]["name"] is None:
-                    # Avoid capturing long phrases, questions, or help requests as names
-                    words_in_message = last_message.lower().split()
-                    num_words = len(words_in_message)
-                    is_potential_name = True
+                # Attempt to extract name (allows overwrite if conditions are met)
+                # Avoid capturing long phrases, questions, or help requests as names
+                words_in_message = last_message.lower().split()
+                num_words = len(words_in_message)
+                is_potential_name = True
 
-                    if num_words < 2 or num_words > 4: # Typical name length
-                        is_potential_name = False
+                if num_words < 2 or num_words > 4: # Typical name length
+                    is_potential_name = False
 
-                    if any(kw in words_in_message for kw in ["help", "assist", "guide", "what", "how", "why", "can", "could", "show", "tell", "explain"]):
-                        is_potential_name = False
+                if any(kw in words_in_message for kw in ["help", "assist", "guide", "what", "how", "why", "can", "could", "show", "tell", "explain"]):
+                    is_potential_name = False
 
-                    if "?" in last_message:
-                        is_potential_name = False
+                if "?" in last_message:
+                    is_potential_name = False
 
-                    if not any(char.isalpha() for char in last_message): # Must contain some letters
-                        is_potential_name = False
+                if not any(char.isalpha() for char in last_message): # Must contain some letters
+                    is_potential_name = False
 
-                    # Ensure it doesn't look like a date or time
-                    if re.search(r'\d{4}-\d{2}-\d{2}', last_message) or re.search(r'\d{2}:\d{2}', last_message):
-                        is_potential_name = False
+                # Ensure it doesn't look like a date or time
+                if re.search(r'\d{4}-\d{2}-\d{2}', last_message) or re.search(r'\d{2}:\d{2}', last_message):
+                    is_potential_name = False
 
-                    if is_potential_name and not any(char.isdigit() for char in last_message):
-                        logger.info(f"Potentially extracting name: {last_message}")
-                        state["booking_info"]["name"] = last_message
-                    else:
-                        logger.info(f"Skipping name extraction for: {last_message} based on new rules.")
+                if is_potential_name and not any(char.isdigit() for char in last_message):
+                    logger.info(f"Potentially extracting name: {last_message}")
+                    state["booking_info"]["name"] = last_message
+                else:
+                    logger.info(f"Skipping name extraction for: {last_message} based on new rules.")
 
             # Date and Time Extraction using dateutil.parser
             if state["booking_info"]["date"] is None or state["booking_info"]["time"] is None:
@@ -538,11 +542,11 @@ class AppointmentAgent:
 
                     # Heuristic to decide if a time was likely mentioned by the user:
                     # Check for explicit time keywords or patterns in the user's message.
-                    potential_time_keywords = ['am', 'pm', 'noon', 'midnight', 'o\'clock', 'hour', 'minute', 'oclock'] # Added oclock
+                    potential_time_keywords = ['am', 'pm', 'noon', 'midnight', 'o\'clock', 'hour', 'minute', 'oclock',
+                               'morning', 'afternoon', 'evening', 'night'] # Added time-of-day words
                     contains_time_keyword = any(kw in last_message.lower() for kw in potential_time_keywords)
-                    # Regex to find HH, HH:MM, optionally with am/pm.
-                    # Ensures it finds patterns like "3pm", "14:30", "7 am".
-                    contains_hour_pattern = re.search(r'\b([0-1]?[0-9]|2[0-3])(?::[0-5][0-9])?(\s*(?:am|pm))?\b', last_message.lower()) is not None
+                    # Regex to find HH or HH:MM that is explicitly a time (due to :MM or am/pm)
+                    contains_hour_pattern = re.search(r'\b([0-1]?[0-9]|2[0-3])(:[0-5][0-9]|(\s*(?:am|pm)))\b', last_message.lower()) is not None
 
                     # Time was likely intended if user used explicit time-related words or number patterns for time.
                     time_was_intended_by_user = contains_time_keyword or contains_hour_pattern
@@ -672,15 +676,18 @@ class AppointmentAgent:
             # 4. We are not in a state where purpose should not be updated (e.g., CS_CONFIRMING_BOOKING_INFO).
             # 5. It's not a leftover from a booking offer affirmation where purpose was pre-filled.
 
-            if state["booking_info"]["purpose"] is None and \
-               not message_was_mainly_datetime and \
+            # Allow purpose to be overwritten if new valid purpose is provided
+            if not message_was_mainly_datetime and \
                len(last_message.split()) > 1 and \
                current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO and \
                not (made_booking_offer and user_affirmed and potential_purpose_from_offer):
 
                 # Further refine: avoid very short messages that might just be affirmations/negations if no other context
-                if len(last_message.split()) < 3 and last_message.lower() in ["yes", "no", "ok", "okay", "sure", "cancel"]:
-                    logger.info(f"Skipping purpose extraction for short affirmation/negation: '{last_message}'")
+                # Allow overwrite even for short messages if in CS_AWAITING_FINAL_CONFIRMATION, as it might be a correction.
+                if len(last_message.split()) < 3 and \
+                   last_message.lower() in ["yes", "no", "ok", "okay", "sure", "cancel"] and \
+                   not state.get("conversation_state") == CS_AWAITING_FINAL_CONFIRMATION:
+                    logger.info(f"Skipping purpose extraction for short affirmation/negation: '{last_message}' (not in correction flow)")
                 else:
                     state["booking_info"]["purpose"] = last_message
                     logger.info(f"Extracted purpose: {state['booking_info']['purpose']}")
@@ -909,4 +916,4 @@ class AppointmentAgent:
         
         return app
 
-
+[end of appointment_system/agent.py]
