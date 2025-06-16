@@ -1,14 +1,11 @@
-import sounddevice as sd
-from google.cloud import speech
-from google.cloud import texttospeech
-import playsound
-import tempfile
-import os # For os.remove with NamedTemporaryFile on Windows
-import queue # For thread-safe data passing from callback to generator
+import sounddevice as sd # Make sure sd is imported
+from google.cloud import speech, texttospeech
+import queue
+import os
 
 # Configuration constants
 SAMPLE_RATE = 16000
-CHUNK_SIZE = int(SAMPLE_RATE / 10) # 100ms
+CHUNK_SIZE = int(SAMPLE_RATE / 10) # 100ms for STT
 
 class SpeechToTextHandler:
     def __init__(self, language_code="en-US"):
@@ -54,14 +51,12 @@ class SpeechToTextHandler:
 
         print("Listening...")
         self._audio_stream_active = True
-        # Ensure buffer is clean for a new attempt
         while not self._buffer.empty():
             try:
                 self._buffer.get_nowait()
             except queue.Empty:
                 break
 
-        # Ensure the responses attribute is reset/available
         self.responses = None
 
         try:
@@ -76,8 +71,7 @@ class SpeechToTextHandler:
                 )
 
                 for response in self.responses:
-                    if not self._audio_stream_active and not response.results : # Check if stream was stopped early
-                        # If buffer is also empty, it means we gracefully stopped or API ended.
+                    if not self._audio_stream_active and not response.results :
                         if self._buffer.empty():
                             break
                     if not response.results:
@@ -91,63 +85,60 @@ class SpeechToTextHandler:
                     if result.is_final:
                         if displayed_interim_transcript:
                              print(f"\r{' ' * len(displayed_interim_transcript)}\r", end='')
-                        final_transcript += transcript # Append, though single_utterance usually means one final result
+                        final_transcript += transcript
                         print(f"STT Final: {final_transcript}")
                         self._audio_stream_active = False
-                        # Send sentinel only if generator might be waiting.
-                        # If API closed stream (normal for single_utterance), generator should exit.
-                        # Putting None ensures _audio_generator stops if it's in a blocking get().
                         self._buffer.put(None)
                         break
-                    else: # Interim result
+                    else:
                         if displayed_interim_transcript:
                             print(f"\r{' ' * len(displayed_interim_transcript)}\r", end='')
                         interim_display = f"STT Interim: {transcript}"
                         print(interim_display, end='')
                         displayed_interim_transcript = interim_display
 
-            if displayed_interim_transcript: # Clear any final interim line
+            if displayed_interim_transcript:
                  print(f"\r{' ' * len(displayed_interim_transcript)}\r", end='')
 
         except sd.PortAudioError as pae:
             print(f"STT Error: Microphone/audio device issue: {pae}")
             self._audio_stream_active = False
-            # Ensure generator is stopped if it was started
-            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue):
+            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue'):
                  self._buffer.put(None)
             return "ERROR_AUDIO_DEVICE"
-        except Exception as e: # Catch other exceptions, including Google API errors
+        except Exception as e:
             print(f"STT Error: General STT service error: {e}")
             self._audio_stream_active = False
-            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue):
+            if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue'):
                  self._buffer.put(None)
             return "ERROR_STT_SERVICE"
         finally:
-            # This block executes regardless of exceptions in try.
-            # Ensures that if _audio_stream_active was True, it's set to False
-            # and the generator is signalled to stop.
-            if self._audio_stream_active: # If stream was active and didn't stop cleanly
+            if self._audio_stream_active:
                  self._audio_stream_active = False
-                 if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue):
-                    self._buffer.put(None) # Signal generator to stop
+                 if hasattr(self, '_buffer') and isinstance(self._buffer, queue.Queue'):
+                    self._buffer.put(None)
 
         if not final_transcript:
-            # This means the loop completed without result.is_final being true,
-            # or self.responses was empty/None.
             print("No speech detected or transcribed.")
-            return "" # Return empty string if no final transcript was captured.
+            return ""
 
         return final_transcript.strip()
 
 class TextToSpeechHandler:
     def __init__(self, language_code="en-US", voice_name="en-US-Standard-C"):
         self.client = texttospeech.TextToSpeechClient()
+        self.language_code = language_code
+        self.voice_name = voice_name
+        self.sample_rate_hertz = SAMPLE_RATE
+
         self.voice_params = texttospeech.VoiceSelectionParams(
-            language_code=language_code,
-            name=voice_name
+            language_code=self.language_code,
+            name=self.voice_name
         )
         self.audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3
+            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+            sample_rate_hertz=self.sample_rate_hertz,
+            # effects_profile_id=['telephony-class-application'] # Optional
         )
 
     def speak(self, text_to_speak):
@@ -155,56 +146,69 @@ class TextToSpeechHandler:
             print("TTS: No text to speak.")
             return
 
-        print(f"TTS Speaking: {text_to_speak[:100]}{'...' if len(text_to_speak) > 100 else ''}")
+        print(f"TTS Speaking (streaming): {text_to_speak[:60]}{'...' if len(text_to_speak) > 60 else ''}")
 
         try:
-            synthesis_input = texttospeech.SynthesisInput(text=text_to_speak)
-            response = self.client.synthesize_speech(
-                input=synthesis_input,
-                voice=self.voice_params,
-                audio_config=self.audio_config
+            streaming_config_request = texttospeech.StreamingSynthesizeConfig(
+                audio_config=self.audio_config,
+                voice=self.voice_params
             )
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-            temp_file.write(response.audio_content)
-            temp_file_path = temp_file.name
-            temp_file.close()
+            request_config = texttospeech.StreamingSynthesizeRequest(
+                streaming_config=streaming_config_request
+            )
+            synthesis_input = texttospeech.SynthesisInput(text=text_to_speak)
+            request_text = texttospeech.StreamingSynthesizeRequest(
+                synthesis_input=synthesis_input
+            )
+            requests_iterable = [request_config, request_text]
 
-            playsound.playsound(temp_file_path)
+            streaming_responses = self.client.streaming_synthesize(requests=requests_iterable)
 
+            with sd.RawOutputStream(samplerate=self.sample_rate_hertz,
+                                    channels=1,
+                                    dtype='int16',
+                                    ) as stream:
+
+                # print("TTS: Stream opened. Receiving and playing audio chunks...") # Debug
+                for response_chunk in streaming_responses:
+                    if response_chunk.audio_content:
+                        stream.write(response_chunk.audio_content)
+                # print("TTS: Finished receiving and playing audio.") # Debug
+
+        except sd.PortAudioError as pae:
+            print(f"TTS Playback Error (PortAudioError): {pae}. Check your audio output device and configuration.")
         except Exception as e:
-            print(f"TTS Error: Failed to synthesize or play speech: {e}")
-        finally:
-            if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
-                try:
-                    os.remove(temp_file_path)
-                except Exception as e:
-                    print(f"TTS Error: Failed to delete temporary file {temp_file_path}: {e}")
+            print(f"TTS Streaming or Playback Error: {e}")
 
 if __name__ == '__main__':
-    # STT Test
-    print("--- STT Test ---")
-    stt_handler = SpeechToTextHandler()
-    try:
-        print("\nSpeak now for STT test (or press Ctrl+C to skip to TTS test)...")
-        text = stt_handler.listen_and_transcribe()
-        if text == "ERROR_AUDIO_DEVICE":
-            print("STT Test: Audio device error. Cannot perform test.")
-        elif text == "ERROR_STT_SERVICE":
-            print("STT Test: STT service error. Cannot perform test.")
-        elif text:
-            print(f"--- You said: {text} ---")
-        else:
-            print("--- No transcription or an error occurred ---")
-    except KeyboardInterrupt:
-        print("\nSkipping STT test.")
-    except Exception as e: # Catch any other unexpected error during test setup/call
-        print(f"Error during STT test setup/call: {e}")
-    finally:
-        print("--- End of STT Test ---")
+    # STT Test (optional, can be commented out if focusing on TTS)
+    # stt_handler = SpeechToTextHandler()
+    # try:
+    #     while True: # Keep prompting for STT until Ctrl+C
+    #         print("\nPress Enter to start STT, then speak. Ctrl+C to exit STT test loop.")
+    #         input()
+    #         text = stt_handler.listen_and_transcribe()
+    #         if text == "ERROR_AUDIO_DEVICE":
+    #             print("STT Test: Audio device error. Cannot perform test.")
+    #             break # Exit STT loop on audio device error
+    #         elif text == "ERROR_STT_SERVICE":
+    #             print("STT Test: STT service error.")
+    #         elif text:
+    #             print(f"--- You said: {text} ---")
+    #         else:
+    #             print("--- No STT transcription ---")
+    # except KeyboardInterrupt:
+    #     print("\nExiting STT test.")
+    # except Exception as e:
+    #     print(f"Error during STT test: {e}")
+    # finally:
+    #     print("--- End of STT Test Section ---")
 
-    # Example TTS usage
-    print("\n--- TTS Test ---")
+
+    # TTS Test
+    print("\n--- TTS Streaming Test ---")
     tts_handler = TextToSpeechHandler()
-    tts_handler.speak("Hello, this is a test of the Text to Speech system.")
-    tts_handler.speak("I should be able to say another sentence after this one.")
+    tts_handler.speak("Hello, this is a test of the new streaming Text to Speech system.")
+    tts_handler.speak("Audio should start playing almost immediately, and not wait for the full sentence to be processed.")
+    tts_handler.speak("Let's try a slightly longer sentence to see how the streaming performs with more content. This should demonstrate the audio starting while the rest is still being synthesized and sent over.")
     print("--- End of TTS Test ---")

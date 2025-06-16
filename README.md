@@ -1,6 +1,6 @@
 # Appointment Booking System with Voice Agent
 
-This project is a Python-based appointment booking system that uses a voice-enabled agent for interaction. Users can speak to the system to book new appointments or view existing ones. The agent utilizes Google's Generative AI, Speech-to-Text, and Text-to-Speech services.
+This project is a Python-based appointment booking system that uses a voice-enabled agent for interaction. Users can speak to the system to book new appointments or view existing ones. The agent utilizes Google's Generative AI. Speech-to-Text is streamed from the user's microphone, and the agent's voice responses are also streamed for lower latency, providing a more real-time conversational experience.
 
 ## Prerequisites
 
@@ -46,7 +46,7 @@ This project is a Python-based appointment booking system that uses a voice-enab
     ```bash
     pip install -r requirement.txt
     ```
-    This will install all necessary Python packages, including the Google Cloud client libraries, `sounddevice` for audio I/O, `playsound` for audio playback, and libraries for the agent.
+    This will install all necessary Python packages, including the Google Cloud client libraries, and `sounddevice` which is used for both microphone input and streaming audio playback. Libraries for the agent are also included. (`playsound` is also included in `requirement.txt` but primary audio I/O is handled by `sounddevice`).
 
 4.  **Set Up Environment Variables**:
     Create a `.env` file in the root directory of the project and add your specific configuration:
