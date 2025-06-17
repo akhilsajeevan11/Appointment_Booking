@@ -1,7 +1,7 @@
 import sounddevice as sd
-# from google.cloud import speech # Removed
 from google.cloud import texttospeech # Keep for TTS
-from deepgram import DeepgramClient, DeepgramClientOptions, LiveTranscriptionEvents, LiveOptions
+# Remove LiveTranscriptionEvents if no longer used, keep others
+from deepgram import DeepgramClient, DeepgramClientOptions, LiveOptions
 import asyncio
 import threading
 import os
@@ -20,8 +20,8 @@ class SpeechToTextHandler:
         self.deepgram_client = DeepgramClient(api_key=deepgram_api_key, config=config)
 
         self.final_transcript = ""
-        self.interim_transcript = "" # For displaying interim results
-        self._full_final_speech = "" # To accumulate final segments for current utterance
+        self.interim_transcript = ""
+        self._current_utterance_final_transcript = "" # Accumulates final segments for the current utterance
         self.transcript_ready_event = threading.Event()
         self.dg_connection = None
         self._audio_stream_active = False
@@ -31,7 +31,6 @@ class SpeechToTextHandler:
 
     def _audio_callback(self, indata, frames, time, status):
         if status:
-            # sd.CallbackFlags also has .input_underflow, .input_overflow etc.
             print(f"Sounddevice status: {status}", flush=True)
         if self._audio_stream_active:
             self._audio_buffer.put(bytes(indata))
@@ -40,187 +39,221 @@ class SpeechToTextHandler:
         print(f"Deepgram Connection Open: {open_result}")
 
     async def _on_message(self, result, **kwargs):
-        # This handler is called for LiveTranscriptionEvents.TRANSCRIPT_RECEIVED
-        transcript = result.channel.alternatives[0].transcript
+        try:
+            # Assuming 'result' is ListenLiveResponse from deepgram-sdk v0.16+
+            transcript = result.channel.alternatives[0].transcript
+            if transcript: # Only process if there's a transcript
+                if result.is_final: # This is a final segment of speech
+                    self._current_utterance_final_transcript += transcript + " "
 
-        if result.is_final and transcript.strip(): # A final segment of speech
-            self._full_final_speech += transcript + " "
-            # Update interim display to show the latest final part clearly before it's fully final for utterance
-            # print(f"\rSTT Interim (Deepgram): {self._full_final_speech}", end='')
-            # self.interim_transcript = self._full_final_speech # Keep interim updated with latest confirmed speech
+                    # Clear previous interim/update line before printing new one
+                    if self.interim_transcript:
+                        print(f"\r{' ' * (len(self.interim_transcript) + 30)}\r", end='') # +30 for "STT Interim/Update (Deepgram): "
 
-        if result.speech_final: # End of an utterance
-            print(f"\r{' ' * len(self.interim_transcript)}\r", end='') # Clear last interim line
-            self.final_transcript = self._full_final_speech.strip()
-            print(f"STT Final (Deepgram): {self.final_transcript}")
-            self.interim_transcript = ""
-            self._full_final_speech = "" # Reset for next utterance
-            self.transcript_ready_event.set() # Signal main thread: speech is fully processed
+                    if result.speech_final: # End of the entire utterance
+                        self.final_transcript = self._current_utterance_final_transcript.strip()
+                        self._current_utterance_final_transcript = "" # Reset for next utterance
+                        print(f"STT Final (Deepgram): {self.final_transcript}")
+                        self.interim_transcript = "" # Clear any interim display
+                        self.transcript_ready_event.set() # Signal main thread for final transcript
+                    else:
+                        # It's a final segment, but not the end of the whole speech.
+                        # Update display with this more solid part.
+                        # self.interim_transcript = self._current_utterance_final_transcript.strip() # Keep this as interim
+                        # For more dynamic display, show accumulating final segments as "Update"
+                        print(f"STT Update (Deepgram): {self._current_utterance_final_transcript.strip()}", end='')
+                        self.interim_transcript = f"STT Update (Deepgram): {self._current_utterance_final_transcript.strip()}"
 
-        elif not result.is_final and transcript.strip(): # Interim result for current segment
-            current_display_transcript = self._full_final_speech + transcript
-            print(f"\r{' ' * len(self.interim_transcript)}\r", end='')
-            self.interim_transcript = current_display_transcript
-            print(f"STT Interim (Deepgram): {self.interim_transcript}", end='')
 
+                else: # This is an interim result for the current segment
+                    # Clear previous interim line
+                    if self.interim_transcript:
+                        print(f"\r{' ' * (len(self.interim_transcript) + 30)}\r", end='')
+
+                    # Display current full interim (accumulated finals + current interim segment)
+                    current_full_interim = self._current_utterance_final_transcript + transcript
+                    self.interim_transcript = f"STT Interim (Deepgram): {current_full_interim.strip()}"
+                    print(self.interim_transcript, end='')
+
+        except Exception as e:
+            print(f"Error processing Deepgram message: {e} - Result: {result}")
+            # Potentially set error state or log more formally
 
     async def _on_error(self, error, **kwargs):
-        error_message = str(error.get('message', str(error))) if isinstance(error, dict) else str(error)
+        error_message = str(error)
+        if isinstance(error, dict) and 'message' in error:
+             error_message = error['message']
         print(f"Deepgram Error: {error_message}")
-        self.final_transcript = f"ERROR_DEEPGRAM_STT: {error_message}"
-        if self._full_final_speech: # If there was some speech before error
-            self.final_transcript = self._full_final_speech.strip() + f" (Error after: {error_message})"
-        self.transcript_ready_event.set()
+
+        # Preserve any partial transcript before error
+        if self._current_utterance_final_transcript:
+            self.final_transcript = self._current_utterance_final_transcript.strip() + f" (ERROR_DEEPGRAM_STT: {error_message})"
+        else:
+            self.final_transcript = f"ERROR_DEEPGRAM_STT: {error_message}"
+
+        self._current_utterance_final_transcript = "" # Clear accumulator
+        if not self.transcript_ready_event.is_set():
+            self.transcript_ready_event.set()
 
     async def _on_close(self, close, **kwargs):
         print(f"Deepgram Connection Closed: {close}")
         if not self.transcript_ready_event.is_set():
-            if self._full_final_speech: # If connection closes mid-utterance with some final segments
-                self.final_transcript = self._full_final_speech.strip()
+            if self._current_utterance_final_transcript: # If connection closes mid-utterance
+                self.final_transcript = self._current_utterance_final_transcript.strip()
+                print(f"STT Final (Deepgram - on close): {self.final_transcript}")
             elif not self.final_transcript: # If no final transcript was set by error or speech_final
-                 self.final_transcript = "ERROR_DEEPGRAM_CLOSED" # Or empty if preferred
+                 self.final_transcript = "ERROR_DEEPGRAM_CLOSED"
+            self._current_utterance_final_transcript = ""
+            self.transcript_ready_event.set() # Ensure main thread unblocks
+
+    async def _start_and_run_deepgram(self, options):
+        # Assign handlers using string literals
+        self.dg_connection.on("open", self._on_open)
+        self.dg_connection.on("transcript_received", self._on_message)
+        self.dg_connection.on("error", self._on_error)
+        self.dg_connection.on("close", self._on_close)
+
+        print("Deepgram: Starting connection with options...")
+        if not await self.dg_connection.start(options):
+            print("Deepgram: Failed to start connection.")
+            self.final_transcript = "ERROR_DEEPGRAM_START_FAILED"
             self.transcript_ready_event.set()
+            return
 
-    async def _run_deepgram_async_tasks(self):
-        # This is the core async part that will run in the dedicated thread
-        self.dg_connection.on(LiveTranscriptionEvents.OPEN, self._on_open)
-        self.dg_connection.on(LiveTranscriptionEvents.TRANSCRIPT_RECEIVED, self._on_message)
-        self.dg_connection.on(LiveTranscriptionEvents.ERROR, self._on_error)
-        self.dg_connection.on(LiveTranscriptionEvents.CLOSE, self._on_close)
-
-        options = LiveOptions(
-            model="nova-2", language="en-US", smart_format=True,
-            encoding="linear16", sample_rate=SAMPLE_RATE, channels=1,
-            interim_results=True, utterance_end_ms="1200", # Adjusted for slightly longer pauses
-            # vad_events=True # If on_speech_started etc. are needed
-        )
-
-        try:
-            print("Deepgram: Starting connection...")
-            if not await self.dg_connection.start(options): # Returns True on success
-                print("Deepgram: Failed to start connection.")
-                self.final_transcript = "ERROR_DEEPGRAM_START_FAILED"
-                self.transcript_ready_event.set()
-                return
-
-            # Audio sending loop (moved into the async thread for better control with async dg_connection)
-            while self._audio_stream_active:
-                try:
-                    audio_chunk = await asyncio.wait_for(asyncio.get_event_loop().run_in_executor(None, self._audio_buffer.get, True, 0.1), timeout=0.2)
-                    if audio_chunk is None: # Sentinel to stop
-                        break
-                    if not self.dg_connection.send(audio_chunk):
-                        print("Deepgram: Failed to send audio, closing stream from here.")
-                        self._audio_stream_active = False # Stop further audio processing
-                        break
-                except queue.Empty: # Expected when no audio, continue loop
-                    continue
-                except asyncio.TimeoutError: # Expected when no audio, continue loop
-                    continue
-                except Exception as e:
-                    print(f"Deepgram: Error in audio sending loop: {e}")
+        # Audio sending loop
+        while self._audio_stream_active:
+            try:
+                # Using run_in_executor for blocking queue.get in async code
+                audio_chunk = await asyncio.get_event_loop().run_in_executor(None, self._audio_buffer.get, True, 0.1)
+                if audio_chunk is None: # Sentinel
+                    print("Deepgram: Sentinel received, stopping audio sending.")
+                    break
+                if not self.dg_connection.send(audio_chunk):
+                    print("Deepgram: Failed to send audio, connection might be closing.")
                     self._audio_stream_active = False
                     break
+            except queue.Empty: # Expected when no audio, continue polling
+                if not self._audio_stream_active: break # Exit if stream became inactive
+                continue
+            except Exception as e:
+                print(f"Deepgram: Error in audio sending loop: {e}")
+                self._audio_stream_active = False
+                break
 
-            print("Deepgram: Audio sending loop finished.")
-
-        except Exception as e:
-            print(f"Deepgram: Error in run_deepgram_async_tasks: {e}")
-            if not self.transcript_ready_event.is_set():
-                self.final_transcript = f"ERROR_DEEPGRAM_ASYNC_TASK: {e}"
-                self.transcript_ready_event.set()
-        finally:
-            if self.dg_connection and self.dg_connection.is_connected:
-                await self.dg_connection.finish() # Ensure connection is closed
-            print("Deepgram: Async tasks finished.")
+        print("Deepgram: Audio sending loop finished.")
+        # Ensure connection finish is called if loop terminates before on_close from server
+        if self.dg_connection and self.dg_connection.is_connected():
+            print("Deepgram: Proactively finishing connection from client side.")
+            await self.dg_connection.finish()
 
 
-    def _start_deepgram_thread(self):
-        # Runs the asyncio event loop for Deepgram in a separate thread
-        async def main_async_loop():
-            await self._run_deepgram_async_tasks()
-
+    def _run_deepgram_in_thread(self):
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(main_async_loop())
+
+            options = LiveOptions(
+                model="nova-2", language="en-US", smart_format=True,
+                encoding="linear16", sample_rate=SAMPLE_RATE, channels=1,
+                interim_results=True, utterance_end_ms="1000",
+            )
+            loop.run_until_complete(self._start_and_run_deepgram(options))
         except Exception as e:
             print(f"Critical error in Deepgram thread: {e}")
+            self.final_transcript = "ERROR_DEEPGRAM_THREAD_CRASH"
             if not self.transcript_ready_event.is_set():
-                 self.final_transcript = "ERROR_DEEPGRAM_THREAD_CRASH"
-                 self.transcript_ready_event.set()
+                self.transcript_ready_event.set()
+        finally:
+            print("Deepgram: _run_deepgram_in_thread finished.")
 
 
     def listen_and_transcribe(self):
         self.final_transcript = ""
         self.interim_transcript = ""
-        self._full_final_speech = ""
+        self._current_utterance_final_transcript = ""
         self.transcript_ready_event.clear()
         self._audio_stream_active = True
 
-        while not self._audio_buffer.empty(): # Clear buffer from previous runs
+        while not self._audio_buffer.empty():
             try: self._audio_buffer.get_nowait()
             except queue.Empty: break
+
+        self._deepgram_thread = None
 
         try:
             self.dg_connection = self.deepgram_client.listen.live.v("1")
 
-            self._deepgram_thread = threading.Thread(target=self._start_deepgram_thread)
+            self._deepgram_thread = threading.Thread(target=self._run_deepgram_in_thread)
             self._deepgram_thread.daemon = True
             self._deepgram_thread.start()
 
             print("Listening (Deepgram)...")
-            # Using sounddevice RawInputStream
             with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=SD_CHUNK_SIZE,
                                    device=None, dtype='int16', channels=1,
                                    callback=self._audio_callback) as stream:
 
-                # Wait for the final transcript or an error
-                timeout_seconds = 30  # Max time to wait for a complete utterance
+                # Main loop for this method is just waiting for the event or timeout
+                # Audio is captured by sounddevice's thread and sent by Deepgram's thread
+                timeout_seconds = 30
                 if not self.transcript_ready_event.wait(timeout=timeout_seconds):
                     print("Deepgram STT: Timed out waiting for transcript.")
-                    if not self.final_transcript: # If no error/transcript set by Deepgram handlers
+                    if not self.final_transcript:
                         self.final_transcript = "ERROR_DEEPGRAM_TIMEOUT"
+                    # Ensure audio stream stops on timeout
+                    self._audio_stream_active = False
+                    self._audio_buffer.put(None) # Signal audio sending loop
 
-                # Ensure interim transcript display is cleared after waiting
-                if self.interim_transcript:
-                    print(f"\r{' ' * len(self.interim_transcript)}\r", end='')
+            # After stream closes or timeout, ensure the event is set if thread is still running
+            if self._deepgram_thread and self._deepgram_thread.is_alive() and not self.transcript_ready_event.is_set():
+                print("Deepgram STT: Forcing event set after timeout/stream closure.")
+                self.transcript_ready_event.set() # This might be too late or abrupt for the thread.
 
+            # Clean up any final interim display
+            if self.interim_transcript:
+                print(f"\r{' ' * (len(self.interim_transcript) + 30)}\r", end='')
 
         except sd.PortAudioError as pae:
             print(f"STT Error: Microphone/audio device issue: {pae}")
             self.final_transcript = "ERROR_AUDIO_DEVICE"
+            self._audio_stream_active = False
+            self._audio_buffer.put(None)
+            if self.dg_connection and self.dg_connection.is_connected(): # Try to signal close
+                 asyncio.run(self.dg_connection.finish()) # This is tricky from non-async context
         except Exception as e:
-            print(f"STT Error: General Deepgram setup/service error: {e}")
-            if not self.final_transcript: # Avoid overwriting specific Deepgram error
-                self.final_transcript = "ERROR_DEEPGRAM_STT_SETUP"
+            print(f"STT Error: General Deepgram setup/runtime error: {e}")
+            if not self.final_transcript: # Avoid overwriting specific error
+                 self.final_transcript = "ERROR_DEEPGRAM_UNEXPECTED"
+            self._audio_stream_active = False
+            self._audio_buffer.put(None)
         finally:
-            self._audio_stream_active = False # Signal audio callback and sending loop to stop
-            self._audio_buffer.put(None) # Sentinel for audio sending loop if it's blocking on get
-
-            if self.dg_connection and self.dg_connection.is_connected:
-                 # dg_connection.finish() should be called from the thread where it runs.
-                 # Here, we rely on the _start_deepgram_thread's finally block.
-                 pass
+            self._audio_stream_active = False
+            # Ensure buffer is cleared and sentinel added
+            while not self._audio_buffer.empty():
+                try: self._audio_buffer.get_nowait()
+                except queue.Empty: break
+            self._audio_buffer.put(None)
 
             if self._deepgram_thread and self._deepgram_thread.is_alive():
-                print("Deepgram STT: Waiting for Deepgram thread to finish...")
-                self._deepgram_thread.join(timeout=5.0) # Wait for thread to complete
+                print("Deepgram STT: Waiting for Deepgram thread to join...")
+                # The thread should ideally exit on its own when dg_connection.finish() is called
+                # or its audio sending loop terminates.
+                self.transcript_ready_event.set() # Ensure it's set so thread can exit if waiting on something
+                self._deepgram_thread.join(timeout=3.0)
                 if self._deepgram_thread.is_alive():
-                    print("Deepgram STT: Deepgram thread did not finish cleanly.")
-            print("Deepgram STT: listen_and_transcribe finished.")
+                    print("Deepgram STT: Warning - Deepgram thread did not join cleanly.")
 
+            print(f"Deepgram STT: listen_and_transcribe finished. Final transcript: '{self.final_transcript}'")
 
-        if not self.final_transcript.strip() and not self.final_transcript.startswith("ERROR_"):
-            print(f"Deepgram STT: No valid transcript obtained. Final raw: '{self.final_transcript}'")
-            # Return empty string for "no speech" or only errors.
-            if not self.final_transcript.startswith("ERROR_"):
-                return ""
+        # Return only if it's not an error string or empty
+        if self.final_transcript.startswith("ERROR_"):
+            return self.final_transcript.strip()
+        elif not self.final_transcript.strip():
+            return "" # Return empty for no speech
 
         return self.final_transcript.strip()
 
 
-# --- TextToSpeechHandler class remains unchanged from previous steps ---
+# --- TextToSpeechHandler class ---
 class TextToSpeechHandler:
     def __init__(self, language_code="en-US", voice_name="en-US-Standard-C"):
         self.client = texttospeech.TextToSpeechClient()
@@ -232,9 +265,9 @@ class TextToSpeechHandler:
             language_code=self.language_code,
             name=self.voice_name
         )
-        self.audio_config = texttospeech.AudioConfig(
+        self.audio_config_for_tts = texttospeech.AudioConfig( # Renamed
             audio_encoding=texttospeech.AudioEncoding.LINEAR16,
-            sample_rate_hertz=self.sample_rate_hertz,
+            sample_rate_hertz=self.sample_rate_hertz
         )
 
     def speak(self, text_to_speak):
@@ -245,13 +278,17 @@ class TextToSpeechHandler:
         print(f"TTS Speaking (streaming): {text_to_speak[:60]}{'...' if len(text_to_speak) > 60 else ''}")
 
         try:
-            streaming_config_request = texttospeech.StreamingSynthesizeConfig(
-                audio_config=self.audio_config,
-                voice=self.voice_params
-            )
+            # Correctly prepare StreamingSynthesizeConfig
+            streaming_config_obj = texttospeech.StreamingSynthesizeConfig()
+            streaming_config_obj.audio_config = self.audio_config_for_tts # Set attribute
+            streaming_config_obj.voice = self.voice_params           # Set attribute
+
+            # First request: configuration
             request_config = texttospeech.StreamingSynthesizeRequest(
-                streaming_config=streaming_config_request
+                streaming_config=streaming_config_obj # Use the configured object
             )
+
+            # Second request: text input
             synthesis_input = texttospeech.SynthesisInput(text=text_to_speak)
             request_text = texttospeech.StreamingSynthesizeRequest(
                 synthesis_input=synthesis_input
@@ -263,7 +300,7 @@ class TextToSpeechHandler:
             with sd.RawOutputStream(samplerate=self.sample_rate_hertz,
                                     channels=1,
                                     dtype='int16',
-                                    ) as stream:
+                                    device=None) as stream: # Explicitly set device=None for default
                 for response_chunk in streaming_responses:
                     if response_chunk.audio_content:
                         stream.write(response_chunk.audio_content)
@@ -273,37 +310,39 @@ class TextToSpeechHandler:
             print(f"TTS Streaming or Playback Error: {e}")
 
 if __name__ == '__main__':
-    # STT Test (Deepgram)
-    print("--- Deepgram STT Test ---")
+    print("--- Voice I/O Module Test ---")
+
+    # Test TextToSpeechHandler (Google Cloud TTS)
+    print("\n--- Testing TextToSpeechHandler (Google Cloud TTS - Streaming) ---")
+    try:
+        tts_handler = TextToSpeechHandler()
+        tts_handler.speak("Hello, this is a test of the streaming Text to Speech system using Google Cloud.")
+        tts_handler.speak("Audio should start playing almost immediately.")
+        # tts_handler.speak("Let's try a slightly longer sentence to see how the streaming performs with more content. This should demonstrate the audio starting while the rest is still being synthesized and sent over.")
+    except Exception as e:
+        print(f"Error during TTS test: {e}")
+    print("--- Finished TTS Test ---")
+
+    # Test SpeechToTextHandler (Deepgram STT)
+    print("\n--- Testing SpeechToTextHandler (Deepgram STT) ---")
     try:
         api_key = os.environ.get("DEEPGRAM_API_KEY")
         if not api_key:
-            raise ValueError("DEEPGRAM_API_KEY environment variable not set for testing.")
-
-        stt_handler = SpeechToTextHandler(deepgram_api_key=api_key)
-
-        # Test STT once
-        print("\nSpeak now for Deepgram STT test (Ctrl+C to skip/exit)...")
-        text = stt_handler.listen_and_transcribe()
-
-        if text and not text.startswith("ERROR_"):
-            print(f"--- You said (Deepgram): '{text}' ---")
-        elif text.startswith("ERROR_AUDIO_DEVICE"):
-            print(f"--- STT Test: Audio device error: {text} ---")
+            print("DEEPGRAM_API_KEY environment variable not set. Skipping Deepgram STT test.")
         else:
-            print(f"--- No valid transcription from Deepgram. Result: '{text}' ---")
-
+            stt_handler = SpeechToTextHandler(deepgram_api_key=api_key)
+            for i in range(2): # Allow a couple of attempts
+                print(f"\nSTT Attempt {i+1}/2. Press Enter to start speaking, then speak. (Ctrl+C to skip remaining STT tests)")
+                input()
+                text = stt_handler.listen_and_transcribe()
+                if text and not text.startswith("ERROR_"):
+                    print(f"--- You said (Deepgram): {text} ---")
+                else:
+                    print(f"--- No valid transcription from Deepgram. Result: {text} ---")
     except KeyboardInterrupt:
-        print("\nUser skipped/exited Deepgram STT test.")
-    except ValueError as ve:
-        print(f"Config Error: {ve}")
+        print("\nSkipped remaining STT tests.")
     except Exception as e:
-        print(f"An unexpected error occurred during STT test setup: {e}")
-    finally:
-        print("--- End of Deepgram STT Test Section ---")
+        print(f"Error during STT test setup or execution: {e}")
+    print("--- Finished STT Test ---")
 
-    # TTS Test (Google) - remains the same
-    print("\n--- TTS Streaming Test (Google) ---")
-    tts_handler = TextToSpeechHandler() # Google TTS
-    tts_handler.speak("This is a test of the Google Text to Speech system using streaming playback.")
-    print("--- End of TTS Test ---")
+    print("\n--- Voice I/O Module Test Complete ---")
