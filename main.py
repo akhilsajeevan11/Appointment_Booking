@@ -55,7 +55,6 @@ def main():
         "conversation_state": CS_INITIAL_GREETING
     }
     
-    }
 
     # Initial greeting by TTS
     initial_greeting = "Welcome to the voice-enabled appointment system. How can I help you today?"
