@@ -1,30 +1,30 @@
 # Appointment Booking System with Voice Agent
 
-This project is a Python-based appointment booking system that uses a voice-enabled agent for interaction. Users can speak to the system to book new appointments or view existing ones. The agent utilizes Google's Generative AI. Speech-to-Text is provided by Deepgram's real-time streaming API, and the agent's voice responses (Text-to-Speech) are generated using Google Cloud TTS and streamed for lower latency, providing a more real-time conversational experience.
+This project is a Python-based appointment booking system that uses a voice-enabled agent for interaction. Speech-to-Text (STT) is handled by Deepgram's real-time streaming API, Text-to-Speech (TTS) is performed locally using Piper TTS, and the agent's core logic uses Google's Generative AI models via LangChain.
 
 ## Prerequisites
 
 1.  **Python**: Python 3.7+ installed.
 2.  **pip**: Python package installer.
 3.  **Deepgram Account**:
-    *   A Deepgram account and an API key for their Speech-to-Text service.
-4.  **Google Cloud Platform (GCP) Project** (for Text-to-Speech):
-    *   A valid GCP project.
-    *   Enable the **Cloud Text-to-Speech API** for your project (Speech-to-Text is now handled by Deepgram).
-    *   **Authentication (for Google Cloud Text-to-Speech)**: Set up Application Default Credentials (ADC). The easiest way for local development is to install the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) and run:
-        ```bash
-        gcloud auth application-default login
-        ```
-        This will store credentials locally that the Google Cloud client libraries can automatically pick up for TTS.
+    *   A Deepgram account is required for Speech-to-Text.
+    *   You'll need a **Deepgram API Key**.
+4.  **Piper TTS Setup**:
+    *   **Piper Executable**: Download the Piper executable suitable for your system from the [Piper GitHub releases page](https://github.com/rhasspy/piper/releases).
+    *   **Piper Voice Model**: Download a voice model for Piper. Each voice consists of an `.onnx` file and a corresponding `.onnx.json` configuration file. You can find voices on [Hugging Face (e.g., rhasspy/piper-voices)](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0).
+    *   You will need to set environment variables pointing to the paths of the executable and these two model files.
 5.  **Audio Hardware**:
     *   A working microphone connected to your system for voice input.
     *   Speakers or headphones for audio output.
 6.  **MySQL Database**:
     *   A running MySQL server instance.
-    *   You need to have a database created and user credentials with permissions to create tables and read/write data. The application will attempt to create the `appointments` table if it doesn't exist within the specified database.
-7.  **Environment Variables**:
-    *   `DEEPGRAM_API_KEY`: Your API key for the Deepgram Speech-to-Text service.
-    *   `GOOGLE_API_KEY`: An API key for the Google Generative AI service (e.g., Gemini) used by the appointment agent.
+    *   You need to have a database created and user credentials with permissions to create tables and read/write data. The application will attempt to create the `appointments` table if it doesn't exist.
+7.  **Environment Variables** (to be set, e.g., in a `.env` file):
+    *   `GOOGLE_API_KEY`: Your API key for Google Generative AI (e.g., for the Gemini model used by the agent).
+    *   `DEEPGRAM_API_KEY`: Your API key for the Deepgram STT service.
+    *   `PIPER_EXE_PATH`: Full path to the downloaded `piper` executable file.
+    *   `PIPER_MODEL_ONNX_PATH`: Full path to the chosen Piper `.onnx` voice model file.
+    *   `PIPER_MODEL_JSON_PATH`: Full path to the corresponding `.onnx.json` voice configuration file for the chosen model.
     *   `MYSQL_HOST`: Hostname of your MySQL server (e.g., `localhost`).
     *   `MYSQL_USER`: MySQL username.
     *   `MYSQL_PASSWORD`: MySQL password.
@@ -49,58 +49,54 @@ This project is a Python-based appointment booking system that uses a voice-enab
     ```bash
     pip install -r requirement.txt
     ```
-    This will install all necessary Python packages, including `deepgram-sdk` for speech-to-text, `google-cloud-texttospeech` for text-to-speech, and `sounddevice` which is used for both microphone input and streaming audio playback. Libraries for the agent are also included. (`playsound` is another audio library present in `requirement.txt` but `sounddevice` handles primary audio I/O).
+    This will install all necessary Python packages, including `deepgram-sdk` for speech-to-text, `piper-tts` (which provides tools related to Piper, though you download the executable separately as per above), `sounddevice` for audio I/O, and libraries for the agent.
 
-4.  **Set Up Environment Variables**:
+4.  **Download Piper Executable and Voice Model**:
+    *   Download the `piper` executable from [Piper GitHub releases](https://github.com/rhasspy/piper/releases) and place it in a known location.
+    *   Download your chosen `.onnx` voice file and its `.onnx.json` config file from a source like [Hugging Face rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0) and place them in a known location.
+
+5.  **Set Up Environment Variables**:
     Create a `.env` file in the root directory of the project and add your specific configuration:
     ```env
-    DEEPGRAM_API_KEY="your_deepgram_api_key"
     GOOGLE_API_KEY="your_google_generative_ai_api_key"
+    DEEPGRAM_API_KEY="your_deepgram_api_key"
+
+    PIPER_EXE_PATH="/path/to/your/piper_executable/piper"
+    PIPER_MODEL_ONNX_PATH="/path/to/your/voice_model.onnx"
+    PIPER_MODEL_JSON_PATH="/path/to/your/voice_model.onnx.json"
+
     MYSQL_HOST="localhost"
     MYSQL_USER="your_mysql_user"
     MYSQL_PASSWORD="your_mysql_password"
     MYSQL_DATABASE_NAME="your_database_name"
     MYSQL_PORT="3306"
-
-    # If you are using a specific service account JSON file for GCP authentication
-    # (instead of gcloud ADC), you might also set:
-    # GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/service-account-file.json"
-    # However, using `gcloud auth application-default login` is generally simpler for local development.
     ```
-    The application uses `python-dotenv` to load these variables.
+    Replace paths and keys with your actual values.
 
 ## Running the Application
 
-1.  Ensure your MySQL server is running and accessible with the configured credentials.
-2.  Ensure your microphone is connected and configured as the default input device for your system.
-3.  Run the main script:
+1.  Ensure your MySQL server is running and accessible.
+2.  Ensure your microphone is connected and configured.
+3.  Verify all environment variables in `.env` are correctly set.
+4.  Run the main script:
     ```bash
     python main.py
     ```
 
 ## How to Use
 
-*   When you run `main.py`, the system will greet you.
-*   The console will display "Listening..." when it's ready for your voice input.
-*   Speak your command clearly. For example:
-    *   "Book an appointment for John Doe for next Friday at 2 PM for a checkup."
-    *   "I want to schedule a meeting."
-    *   "View my appointments."
-*   The system will transcribe your speech (you'll see "You said: <your_transcribed_text>" and interim STT results in the console).
-*   The agent will process your request and respond. The response will be printed to the console and spoken aloud.
+*   When you run `main.py`, the system will greet you using Piper TTS.
+*   The console will display "Listening (Deepgram)..." when it's ready for your voice input.
+*   Speak your command clearly.
+*   The system will transcribe your speech using Deepgram.
+*   The agent will process your request and respond. The response will be spoken aloud using Piper TTS.
 *   To quit the application, say "exit".
 
 ## Troubleshooting Audio (Linux)
-If `sounddevice` or `playsound` have issues on Linux, you might need to install system dependencies:
-*   For `sounddevice` (PortAudio):
-    ```bash
-    sudo apt-get update
-    sudo apt-get install libportaudio2 libportaudiocpp0 portaudio19-dev
-    ```
-*   For `playsound` (which might use GStreamer via `pygobject` on Linux):
-    ```bash
-    sudo apt-get install python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0 gir1.2-glib-2.0
-    ```
-    If `playsound` still has issues, ensure GStreamer plugins are installed (`gstreamer1.0-plugins-good`, `gstreamer1.0-plugins-ugly`, etc.).
-
+If `sounddevice` has issues on Linux (used for both microphone input and Piper audio output), you might need to install system dependencies for PortAudio:
+```bash
+sudo apt-get update
+sudo apt-get install libportaudio2 libportaudiocpp0 portaudio19-dev
+```
+Ensure your microphone is correctly configured in your Linux sound settings.
 ```

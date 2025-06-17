@@ -77,3 +77,4 @@ google-cloud-texttospeech
 sounddevice
 playsound
 deepgram-sdk
+piper-tts

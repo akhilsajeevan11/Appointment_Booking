@@ -11,17 +11,33 @@ def main():
     if not deepgram_api_key:
         error_message = "Error: DEEPGRAM_API_KEY environment variable not set. Cannot initialize Speech-to-Text."
         print(error_message)
-        try:
-            # Attempt to use TTS for this critical startup error
-            tts_handler_startup_error = TextToSpeechHandler()
-            tts_handler_startup_error.speak(error_message + " Please set the key and restart.")
-        except Exception as tts_init_error:
-            print(f"TTS handler could not be initialized to speak the error: {tts_init_error}")
-        return # Exit if Deepgram key is missing
+        # No TTS available yet to speak this error, as TTS init might also fail or depends on other env vars
+        return
+
+    # Initialize Piper TTS paths
+    piper_exe_path = os.environ.get("PIPER_EXE_PATH")
+    piper_model_onnx_path = os.environ.get("PIPER_MODEL_ONNX_PATH")
+    piper_model_json_path = os.environ.get("PIPER_MODEL_JSON_PATH")
+
+    if not all([piper_exe_path, piper_model_onnx_path, piper_model_json_path]):
+        error_message = ("Error: Piper TTS environment variables (PIPER_EXE_PATH, "
+                         "PIPER_MODEL_ONNX_PATH, PIPER_MODEL_JSON_PATH) not fully set. Cannot initialize Text-to-Speech.")
+        print(error_message)
+        # No TTS available to speak this error.
+        return
+
+    try:
+        stt_handler = SpeechToTextHandler(deepgram_api_key=deepgram_api_key)
+        tts_handler = TextToSpeechHandler(
+            piper_exe_path=piper_exe_path,
+            model_onnx_path=piper_model_onnx_path,
+            model_json_path=piper_model_json_path
+        )
+    except Exception as e:
+        print(f"Error initializing voice handlers: {e}")
+        return
 
     agent = AppointmentAgent().create_agent()
-    stt_handler = SpeechToTextHandler(deepgram_api_key=deepgram_api_key)
-    tts_handler = TextToSpeechHandler() # Google TTS remains, uses ADC
     
     # Initialize state
     state = {
@@ -39,20 +55,23 @@ def main():
         "conversation_state": CS_INITIAL_GREETING
     }
     
-    # Removed duplicated stt_handler instantiation
+    }
+
+    # Initial greeting by TTS
+    initial_greeting = "Welcome to the voice-enabled appointment system. How can I help you today?"
+    print(f"Agent: {initial_greeting}")
+    tts_handler.speak(initial_greeting)
+
     while True:
         user_input = stt_handler.listen_and_transcribe().strip()
 
-        # Check for specific error strings from the STT handler
-        if user_input == "ERROR_AUDIO_DEVICE":
-            error_message = "There seems to be an issue with your audio input device. Please check your microphone and ensure permissions are correct. Exiting."
-            print(f"Agent: {error_message}")
-            # No TTS here as audio input itself failed.
-            break
-        elif user_input.startswith("ERROR_DEEPGRAM_"): # Catch all Deepgram specific errors
-            error_message = f"Sorry, I'm having trouble with the speech recognition service ({user_input}). Please try again in a moment."
+        if user_input.startswith("ERROR_"): # Catch all STT errors (Deepgram or audio device)
+            error_message = f"Speech input error: {user_input}. Please try again."
             print(f"Agent: {error_message}")
             tts_handler.speak(error_message)
+            if user_input == "ERROR_AUDIO_DEVICE": # If critical audio device error, might be best to exit
+                print("Exiting due to critical audio device error.")
+                break
             continue
 
         if not user_input:
