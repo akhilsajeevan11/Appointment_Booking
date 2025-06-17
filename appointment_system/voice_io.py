@@ -21,11 +21,12 @@ class SpeechToTextHandler:
         self.final_transcript = ""
         self.interim_transcript = ""
         self._current_utterance_final_transcript = ""
-        self.transcript_ready_event = threading.Event()
+        self.transcript_ready_event = threading.Event() # For sync between STT thread and main app thread
         self.dg_connection = None
         self._audio_stream_active = False
         self._audio_buffer = queue.Queue()
         self._deepgram_thread = None
+        self._dg_async_completion_event = None # Will be an asyncio.Event, created in the thread
 
 
     def _audio_callback(self, indata, frames, time, status):
@@ -51,6 +52,8 @@ class SpeechToTextHandler:
                         print(f"STT Final (Deepgram): {self.final_transcript}")
                         self.interim_transcript = ""
                         self.transcript_ready_event.set()
+                        if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
+                            self._dg_async_completion_event.set()
                     else:
                         print(f"STT Update (Deepgram): {self._current_utterance_final_transcript.strip()}", end='')
                         self.interim_transcript = f"STT Update (Deepgram): {self._current_utterance_final_transcript.strip()}"
@@ -79,6 +82,8 @@ class SpeechToTextHandler:
         self.final_transcript = full_error_message
         if not self.transcript_ready_event.is_set():
             self.transcript_ready_event.set()
+        if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
+            self._dg_async_completion_event.set()
 
     async def _on_close(self, close, **kwargs):
         print(f"Deepgram Connection Closed: {close}")
@@ -90,24 +95,56 @@ class SpeechToTextHandler:
                  self.final_transcript = "ERROR_DEEPGRAM_CLOSED"
             self._current_utterance_final_transcript = ""
             self.transcript_ready_event.set()
+        if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
+            self._dg_async_completion_event.set()
 
-    async def _start_and_run_deepgram(self, options):
+    async def _start_and_run_deepgram(self, options: LiveOptions, completion_event: asyncio.Event):
         self.dg_connection.on("open", self._on_open)
         self.dg_connection.on("transcript_received", self._on_message)
         self.dg_connection.on("error", self._on_error)
         self.dg_connection.on("close", self._on_close)
+
         print("Deepgram STT: Attempting to start connection with options...")
         try:
-            start_status = self.dg_connection.start(options)
+            start_status = self.dg_connection.start(options) # Synchronous call
             print(f"Deepgram STT: dg_connection.start() called. Returned status: {start_status}")
+
             if isinstance(start_status, bool) and not start_status:
                 print("Deepgram STT Error: start() returned False. Connection failed to initialize properly.")
                 await self._on_error({"message": "Connection start returned false"}, from_start_call=True)
+                completion_event.set()
+            else:
+                print("Deepgram STT: Connection started, awaiting completion signal...")
+                await completion_event.wait()
+                print("Deepgram STT: Completion signal received.")
+
         except Exception as e:
-            print(f"Deepgram STT Error: Exception during Deepgram start or while it was running: {e}")
+            print(f"Deepgram STT Error: Exception during Deepgram start or while running: {e}")
             await self._on_error({"message": f"Exception in _start_and_run_deepgram: {e}"})
-        try: # Audio sending loop
-            while self._audio_stream_active:
+            completion_event.set() # Ensure completion event is set on error
+        finally:
+            print("Deepgram STT: _start_and_run_deepgram coroutine is finishing.")
+        # The audio sending loop is removed from here and managed by the SDK or higher level logic if start is blocking
+        # If start() is non-blocking and needs an explicit send loop, that would be different.
+        # Based on the problem (await bool), start() is sync. The callbacks manage completion.
+
+
+    def _run_deepgram_in_thread(self):
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Create the asyncio.Event within the loop it will be used in
+            self._dg_async_completion_event = asyncio.Event()
+
+            options = LiveOptions(
+                model="nova-2", language="en-US", smart_format=True,
+                encoding="linear16", sample_rate=SAMPLE_RATE, channels=1,
+                interim_results=True, utterance_end_ms="1000",
+            )
+            # Pass the event to the async function
+            loop.run_until_complete(self._start_and_run_deepgram(options, self._dg_async_completion_event))
+        except Exception as e:
                 try:
                     audio_chunk = await asyncio.get_event_loop().run_in_executor(None, self._audio_buffer.get, True, 0.1)
                     if audio_chunk is None:
@@ -144,6 +181,11 @@ class SpeechToTextHandler:
             print(f"Critical error in Deepgram thread: {e}")
             self.final_transcript = "ERROR_DEEPGRAM_THREAD_CRASH"
             if not self.transcript_ready_event.is_set():
+                self.transcript_ready_event.set()
+        finally:
+            print(f"Critical error in Deepgram thread: {e}")
+            self.final_transcript = "ERROR_DEEPGRAM_THREAD_CRASH"
+            if not self.transcript_ready_event.is_set(): # Ensure main thread is signaled
                 self.transcript_ready_event.set()
         finally:
             print("Deepgram: _run_deepgram_in_thread finished.")
@@ -235,44 +277,46 @@ class TextToSpeechHandler:
 
         print(f"TTS Speaking (Deepgram): {text_to_speak[:60]}{'...' if len(text_to_speak) > 60 else ''}")
 
-        source = {"text": text_to_speak}
+        # Move options into the source dictionary
+        source_with_options = {
+            "text": text_to_speak,
+            "model": self.tts_model,
+            "encoding": self.tts_encoding,
+            "sample_rate": self.tts_sample_rate,
+            "container": self.tts_container
+            # Add other parameters like "voice" here if needed
+        }
 
         try:
-            # Using speak.v("1").stream which returns an object with 'stream' (aiohttp.StreamReader) and 'headers'
-            response = await self.deepgram_client.speak.v("1").stream(
-                 source,
-                 model=self.tts_model,
-                 encoding=self.tts_encoding,
-                 sample_rate=self.tts_sample_rate,
-                 container=self.tts_container
-                 # Additional options like voice, pitch, speaking_rate can be added as kwargs
-            )
+            # Call stream() with only the source dictionary
+            response = await self.deepgram_client.speak.v("1").stream(source_with_options)
 
             audio_stream = response.stream
-            # print(f"Deepgram TTS Headers: {response.headers}") # For debugging audio format
-
-            if not audio_stream:
+            if audio_stream:
+                chunk_size = 1024 * 4
+                with sd.RawOutputStream(samplerate=self.tts_sample_rate,
+                                        channels=1,
+                                        dtype='int16',
+                                        device=None) as stream_player:
+                    while True:
+                        chunk = await audio_stream.read(chunk_size)
+                        if not chunk:
+                            break
+                        stream_player.write(chunk)
+                print("Deepgram TTS: Finished speaking.") # Moved inside if audio_stream
+            else:
                 print("Deepgram TTS Error: Failed to obtain audio stream.")
-                return
 
-            with sd.RawOutputStream(samplerate=self.tts_sample_rate,
-                                    channels=1, # Assuming mono, typical for TTS
-                                    dtype='int16', # For linear16 encoding
-                                    device=None) as stream_player:
-
-                chunk_size = 1024 * 4 # 4KB chunks
-                while True:
-                    chunk = await audio_stream.read(chunk_size)
-                    if not chunk:
-                        break # End of stream
-                    stream_player.write(chunk)
-            print("Deepgram TTS: Finished speaking.")
 
         except sd.PortAudioError as pae:
             print(f"TTS Playback Error (PortAudioError with Deepgram TTS): {pae}.")
         except Exception as e:
-            # This will catch errors from Deepgram API (e.g., auth, bad request) or other issues.
-            print(f"Deepgram TTS Error: {e}")
+            # Check if the error message is about unexpected keyword arguments again
+            if "got an unexpected keyword argument" in str(e) or "Unknown parameter" in str(e):
+                print(f"Deepgram TTS Error (Parameter issue likely): {e}")
+                print("This might indicate that options like 'model', 'encoding', etc. are still not correctly structured for the speak.stream API call.")
+            else:
+                print(f"Deepgram TTS Error: {e}")
 
     def speak(self, text_to_speak: str):
         try:
