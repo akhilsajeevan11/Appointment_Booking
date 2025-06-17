@@ -9,55 +9,34 @@ def main():
     # Initialize Deepgram API Key for STT
     deepgram_api_key = os.environ.get("DEEPGRAM_API_KEY")
     if not deepgram_api_key:
-        error_message = "Error: DEEPGRAM_API_KEY environment variable not set. Cannot initialize Speech-to-Text."
+        error_message = "Error: DEEPGRAM_API_KEY environment variable not set. This key is required for both Speech-to-Text and Text-to-Speech."
         print(error_message)
-        # No TTS available yet to speak this error, as TTS init might also fail or depends on other env vars
+        # No STT or TTS available to speak this, as both depend on the key.
         return
 
-    # Initialize Piper TTS paths
-    piper_exe_path = os.environ.get("PIPER_EXE_PATH")
-    piper_model_onnx_path = os.environ.get("PIPER_MODEL_ONNX_PATH")
-    piper_model_json_path = os.environ.get("PIPER_MODEL_JSON_PATH")
-
-    if not all([piper_exe_path, piper_model_onnx_path, piper_model_json_path]):
-        error_message = ("Error: Piper TTS environment variables (PIPER_EXE_PATH, "
-                         "PIPER_MODEL_ONNX_PATH, PIPER_MODEL_JSON_PATH) not fully set. Cannot initialize Text-to-Speech.")
-        print(error_message)
-        # No TTS available to speak this error.
-        return
+    # Remove Piper TTS path retrieval and checks
+    # piper_exe_path = os.environ.get("PIPER_EXE_PATH")
+    # ... (lines for piper paths removed)
+    # if not all([...]):
+    # ... (check for piper paths removed)
 
     try:
         stt_handler = SpeechToTextHandler(deepgram_api_key=deepgram_api_key)
-        tts_handler = TextToSpeechHandler(
-            piper_exe_path=piper_exe_path,
-            model_onnx_path=piper_model_onnx_path,
-            model_json_path=piper_model_json_path
-        )
+        # Initialize TextToSpeechHandler with Deepgram API Key
+        tts_handler = TextToSpeechHandler(deepgram_api_key=deepgram_api_key)
     except Exception as e:
-        print(f"Error initializing voice handlers: {e}")
+        print(f"Error initializing voice handlers (STT or TTS): {e}")
         return
 
-    agent = AppointmentAgent().create_agent()
+    agent = AppointmentAgent().create_agent() # GOOGLE_API_KEY is used inside AppointmentAgent
     
-    # Initialize state
-    state = {
-        "messages": [],
-        "next": "agent",
-        "current_step": "",
-        "booking_info": {
-            "name": None,
-            "date": None,
-            "time": None,
-            "purpose": None
-        },
-        "last_action": None,
-        "action_count": 0,
-        "conversation_state": CS_INITIAL_GREETING
+    state = { # state initialization remains the same
+        "messages": [], "next": "agent", "current_step": "",
+        "booking_info": {"name": None, "date": None, "time": None, "purpose": None},
+        "last_action": None, "action_count": 0, "conversation_state": CS_INITIAL_GREETING
     }
     
-
-    # Initial greeting by TTS
-    initial_greeting = "Welcome to the voice-enabled appointment system. How can I help you today?"
+    initial_greeting = "Welcome to the voice-enabled appointment system, now powered by Deepgram. How can I help you today?"
     print(f"Agent: {initial_greeting}")
     tts_handler.speak(initial_greeting)
 

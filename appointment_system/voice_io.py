@@ -1,14 +1,10 @@
 import sounddevice as sd
-# from google.cloud import texttospeech # Removed
 from deepgram import DeepgramClient, DeepgramClientOptions, LiveOptions
 import asyncio
 import threading
 import os
 import queue
-import subprocess # Added
-import shutil   # Added
-import json     # Added
-from pathlib import Path # Added
+# Removed subprocess, shutil, json, Path as they were for Piper TTS
 
 # Configuration constants
 SAMPLE_RATE = 16000 # This is for STT (Deepgram)
@@ -69,22 +65,18 @@ class SpeechToTextHandler:
 
     async def _on_error(self, error, **kwargs):
         from_start_call = kwargs.get('from_start_call', False)
-        error_message_str = "Unknown Deepgram Error"
+        error_message_detail = "Unknown Deepgram Error"
         if isinstance(error, dict) and 'message' in error:
-            error_message_str = error['message']
+            error_message_detail = error['message']
         elif isinstance(error, Exception):
-            error_message_str = str(error)
+            error_message_detail = str(error)
         elif isinstance(error, str):
-            error_message_str = error
-        else:
-            error_message_str = str(error)
-        print(f"Deepgram Error: {error_message_str}")
-        if not self.final_transcript or self.final_transcript.startswith("ERROR_DEEPGRAM_STT: Unknown Deepgram Error") or from_start_call:
-            if self._current_utterance_final_transcript and not from_start_call:
-                self.final_transcript = self._current_utterance_final_transcript.strip() + f" (ERROR_DEEPGRAM_STT: {error_message_str})"
-            else:
-                self.final_transcript = f"ERROR_DEEPGRAM_STT: {error_message_str}"
-        self._current_utterance_final_transcript = ""
+            error_message_detail = error
+
+        full_error_message = f"ERROR_DEEPGRAM_STT: {error_message_detail}"
+        print(f"Deepgram Error Captured: {full_error_message}")
+
+        self.final_transcript = full_error_message
         if not self.transcript_ready_event.is_set():
             self.transcript_ready_event.set()
 
@@ -104,19 +96,17 @@ class SpeechToTextHandler:
         self.dg_connection.on("transcript_received", self._on_message)
         self.dg_connection.on("error", self._on_error)
         self.dg_connection.on("close", self._on_close)
-        print("Deepgram: Starting connection with options...")
+        print("Deepgram STT: Attempting to start connection with options...")
         try:
-            connection_status = self.dg_connection.start(options)
-            print(f"Deepgram: dg_connection.start() called. Status/Result (if any): {connection_status}")
-            if isinstance(connection_status, bool) and not connection_status:
-                print("Deepgram: start() returned False. Connection might have failed to initialize properly.")
+            start_status = self.dg_connection.start(options)
+            print(f"Deepgram STT: dg_connection.start() called. Returned status: {start_status}")
+            if isinstance(start_status, bool) and not start_status:
+                print("Deepgram STT Error: start() returned False. Connection failed to initialize properly.")
                 await self._on_error({"message": "Connection start returned false"}, from_start_call=True)
-                return
         except Exception as e:
-            print(f"Exception during Deepgram start: {e}")
-            await self._on_error({"message": f"Exception in _start_and_run_deepgram during start: {e}"}, from_start_call=True)
-            return
-        try:
+            print(f"Deepgram STT Error: Exception during Deepgram start or while it was running: {e}")
+            await self._on_error({"message": f"Exception in _start_and_run_deepgram: {e}"})
+        try: # Audio sending loop
             while self._audio_stream_active:
                 try:
                     audio_chunk = await asyncio.get_event_loop().run_in_executor(None, self._audio_buffer.get, True, 0.1)
@@ -219,144 +209,133 @@ class SpeechToTextHandler:
             return ""
         return self.final_transcript.strip()
 
-# --- TextToSpeechHandler class (Piper TTS) ---
+# --- TextToSpeechHandler class (Deepgram TTS) ---
 class TextToSpeechHandler:
-    def __init__(self, piper_exe_path: str, model_onnx_path: str, model_json_path: str):
-        self.piper_exe_path = shutil.which(piper_exe_path) or piper_exe_path
-        if not shutil.which(self.piper_exe_path):
-            raise FileNotFoundError(f"Piper executable not found at '{self.piper_exe_path}' or in PATH.")
+    def __init__(self, deepgram_api_key: str, model: str = "aura-asteria-en",
+                 sample_rate: int = 24000, encoding: str = "linear16",
+                 container: str = "none"):
+        if not deepgram_api_key:
+            raise ValueError("Deepgram API key is required for TextToSpeechHandler.")
 
-        self.model_path = Path(model_onnx_path)
-        self.model_config_path = Path(model_json_path)
+        client_config = DeepgramClientOptions(options={"keepalive": "true"})
+        self.deepgram_client = DeepgramClient(api_key=deepgram_api_key, config=client_config)
 
-        if not self.model_path.is_file():
-            raise FileNotFoundError(f"Piper model (.onnx) not found at '{self.model_path}'")
-        if not self.model_config_path.is_file():
-            raise FileNotFoundError(f"Piper model config (.json) not found at '{self.model_config_path}'")
+        self.tts_model = model
+        self.tts_sample_rate = sample_rate
+        self.tts_encoding = encoding
+        self.tts_container = container
 
-        self.sample_rate_hertz = self._load_sample_rate_from_config()
+        if self.tts_encoding != "linear16" or self.tts_container != "none":
+            print(f"Warning: TextToSpeechHandler is optimized for linear16 encoding and 'none' container for direct playback. Current settings: encoding='{self.tts_encoding}', container='{self.tts_container}'. Playback might fail if not raw PCM.")
 
-    def _load_sample_rate_from_config(self) -> int:
-        try:
-            with open(self.model_config_path, 'r', encoding='utf-8') as f:
-                config_data = json.load(f)
-            sample_rate = int(config_data.get("audio", {}).get("sample_rate", 22050))
-            print(f"Piper TTS: Loaded sample rate {sample_rate} Hz from {self.model_config_path}")
-            return sample_rate
-        except Exception as e:
-            print(f"Piper TTS: Error loading sample rate from '{self.model_config_path}': {e}. Using default 22050 Hz.")
-            return 22050
-
-    def speak(self, text_to_speak):
+    async def _speak_async(self, text_to_speak: str):
         if not text_to_speak:
-            print("TTS (Piper): No text to speak.")
+            print("TTS (Deepgram): No text to speak.")
             return
 
-        print(f"TTS Speaking (Piper): {text_to_speak[:60]}{'...' if len(text_to_speak) > 60 else ''}")
+        print(f"TTS Speaking (Deepgram): {text_to_speak[:60]}{'...' if len(text_to_speak) > 60 else ''}")
 
-        command = [
-            str(self.piper_exe_path),
-            '--model', str(self.model_path),
-            '--config', str(self.model_config_path),
-            '--output-raw'
-        ]
+        source = {"text": text_to_speak}
 
-        process = None
         try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+            # Using speak.v("1").stream which returns an object with 'stream' (aiohttp.StreamReader) and 'headers'
+            response = await self.deepgram_client.speak.v("1").stream(
+                 source,
+                 model=self.tts_model,
+                 encoding=self.tts_encoding,
+                 sample_rate=self.tts_sample_rate,
+                 container=self.tts_container
+                 # Additional options like voice, pitch, speaking_rate can be added as kwargs
             )
 
-            if process.stdin:
-                process.stdin.write(text_to_speak.encode('utf-8'))
-                process.stdin.close()
+            audio_stream = response.stream
+            # print(f"Deepgram TTS Headers: {response.headers}") # For debugging audio format
 
-            with sd.RawOutputStream(samplerate=self.sample_rate_hertz,
-                                    channels=1, dtype='int16', device=None) as stream:
+            if not audio_stream:
+                print("Deepgram TTS Error: Failed to obtain audio stream.")
+                return
+
+            with sd.RawOutputStream(samplerate=self.tts_sample_rate,
+                                    channels=1, # Assuming mono, typical for TTS
+                                    dtype='int16', # For linear16 encoding
+                                    device=None) as stream_player:
+
+                chunk_size = 1024 * 4 # 4KB chunks
                 while True:
-                    audio_chunk = process.stdout.read(1024)
-                    if not audio_chunk:
-                        break
-                    stream.write(audio_chunk)
+                    chunk = await audio_stream.read(chunk_size)
+                    if not chunk:
+                        break # End of stream
+                    stream_player.write(chunk)
+            print("Deepgram TTS: Finished speaking.")
 
-            stderr_data_bytes = process.stderr.read()
-            process.wait()
-
-            if process.returncode != 0:
-                print(f"Piper TTS Error: Exit code {process.returncode}")
-                if stderr_data_bytes:
-                    print(f"Piper STDERR: {stderr_data_bytes.decode('utf-8', errors='ignore')}")
-            elif stderr_data_bytes:
-                print(f"Piper STDERR (info/warnings): {stderr_data_bytes.decode('utf-8', errors='ignore')}")
-
-        except FileNotFoundError:
-            print(f"Piper TTS Error: Executable not found at '{self.piper_exe_path}'.")
         except sd.PortAudioError as pae:
-            print(f"TTS Playback Error (PortAudioError with Piper): {pae}.")
+            print(f"TTS Playback Error (PortAudioError with Deepgram TTS): {pae}.")
         except Exception as e:
-            print(f"General Piper TTS Error: {e}")
-        finally:
-            if process and process.poll() is None:
-                print("Piper TTS: Terminating Piper process.")
-                try:
-                    process.terminate()
-                    process.wait(timeout=2.0)
-                except Exception as e_term:
-                    print(f"Piper TTS: Error during terminate/wait: {e_term}")
-                    try:
-                        process.kill()
-                        process.wait(timeout=2.0)
-                    except Exception as e_kill:
-                         print(f"Piper TTS: Error during kill/wait: {e_kill}")
+            # This will catch errors from Deepgram API (e.g., auth, bad request) or other issues.
+            print(f"Deepgram TTS Error: {e}")
+
+    def speak(self, text_to_speak: str):
+        try:
+            # Run the async _speak_async method in a blocking way
+            asyncio.run(self._speak_async(text_to_speak))
+        except RuntimeError as re:
+            if "cannot run event loop while another loop is running" in str(re) or \
+               "Nesting asyncio event loops is not supported" in str(re):
+                print(f"TTS Async Error: Could not run speak_async due to existing event loop: {re}")
+                print("This TTS handler needs to be called from a synchronous context or adapted for nested loops if used within another asyncio app.")
+            else:
+                # Re-raise other RuntimeErrors if they are not related to event loop nesting
+                raise
 
 if __name__ == '__main__':
     print("--- Voice I/O Module Test ---")
 
-    # Test TextToSpeechHandler (Piper TTS)
-    print("\n--- Testing TextToSpeechHandler (Piper TTS) ---")
-    piper_exe = os.environ.get("PIPER_EXE_PATH")
-    piper_onnx = os.environ.get("PIPER_MODEL_ONNX_PATH")
-    piper_json = os.environ.get("PIPER_MODEL_JSON_PATH")
-
-    if not all([piper_exe, piper_onnx, piper_json]):
-        print("Skipping Piper TTS test: One or more environment variables not set:")
-        print("  PIPER_EXE_PATH, PIPER_MODEL_ONNX_PATH, PIPER_MODEL_JSON_PATH")
+    # Test TextToSpeechHandler (Deepgram TTS)
+    print("\n--- Testing TextToSpeechHandler (Deepgram TTS) ---")
+    dg_api_key_env = os.environ.get("DEEPGRAM_API_KEY")
+    if not dg_api_key_env:
+        print("Skipping Deepgram TTS test: DEEPGRAM_API_KEY environment variable not set.")
     else:
         try:
-            print(f"Piper paths: EXE='{piper_exe}', ONNX='{piper_onnx}', JSON='{piper_json}'")
-            tts_handler = TextToSpeechHandler(
-                piper_exe_path=piper_exe,
-                model_onnx_path=piper_onnx,
-                model_json_path=piper_json
-            )
-            tts_handler.speak("Hello, this is a test of Piper Text to Speech.")
-            tts_handler.speak("Audio should be generated locally and streamed for playback.")
-        except FileNotFoundError as fnf:
-            print(f"Piper TTS FileNotFoundError: {fnf}. Ensure paths are correct and Piper executable has permissions.")
+            # Example with default Aura model (aura-asteria-en, 24000 Hz)
+            # If using a different model, ensure sample_rate matches.
+            # For "aura-luna-en" or "aura-stella-en", sample_rate is often 16000.
+            # Check Deepgram model documentation for correct sample rates.
+            tts_handler = TextToSpeechHandler(deepgram_api_key=dg_api_key_env, model="aura-asteria-en", sample_rate=24000)
+            tts_handler.speak("Hello from Deepgram Text to Speech, using the Aura model.")
+            tts_handler.speak("This audio is being streamed directly to your speakers.")
+
+            # Example for a model that might use 16000 Hz
+            # print("\nTesting with a 16kHz Aura model (example, ensure model name is correct if used)")
+            # tts_handler_16khz = TextToSpeechHandler(deepgram_api_key=dg_api_key_env, model="aura-luna-en", sample_rate=16000)
+            # tts_handler_16khz.speak("This is a test with Luna at sixteen kilohertz.")
+
         except Exception as e:
-            print(f"Error during Piper TTS test: {e}")
-    print("--- Finished Piper TTS Test ---")
+            print(f"Error during Deepgram TTS test: {e}")
+    print("--- Finished Deepgram TTS Test ---")
+
 
     # Test SpeechToTextHandler (Deepgram STT)
     print("\n--- Testing SpeechToTextHandler (Deepgram STT) ---")
-    deepgram_api_key_env = os.environ.get("DEEPGRAM_API_KEY") # Renamed to avoid conflict
-    if not deepgram_api_key_env:
+    # dg_api_key_env is already fetched from above
+    if not dg_api_key_env: # Check again in case only TTS was skipped
         print("Skipping Deepgram STT test: DEEPGRAM_API_KEY environment variable not set.")
     else:
         try:
-            stt_handler = SpeechToTextHandler(deepgram_api_key=deepgram_api_key_env)
-            for i in range(2): # Allow a couple of attempts
-                print(f"\nSTT Attempt {i+1}/2. Press Enter to start speaking, then speak. (Ctrl+C to skip remaining STT tests)")
-                input()
-                text = stt_handler.listen_and_transcribe()
-                if text and not text.startswith("ERROR_"):
-                    print(f"--- You said (Deepgram): {text} ---")
-                else:
-                    print(f"--- No valid transcription from Deepgram. Result: {text} ---")
-        except KeyboardInterrupt:
+            stt_handler = SpeechToTextHandler(deepgram_api_key=dg_api_key_env)
+            for i in range(1): # Reduced to 1 attempt for brevity
+                print(f"\nSTT Attempt {i+1}/1. Press Enter to start speaking, then speak. (Ctrl+C to skip)")
+                try:
+                    input()
+                    text = stt_handler.listen_and_transcribe()
+                    if text and not text.startswith("ERROR_"):
+                        print(f"--- You said (Deepgram): {text} ---")
+                    else:
+                        print(f"--- No valid transcription from Deepgram. Result: {text} ---")
+                except KeyboardInterrupt: # Catch Ctrl+C during input()
+                    print("\nSTT attempt skipped by user.")
+                    break
+        except KeyboardInterrupt: # Catch Ctrl+C during handler init or loop
             print("\nSkipped remaining STT tests.")
         except Exception as e:
             print(f"Error during Deepgram STT test setup or execution: {e}")

@@ -1,30 +1,22 @@
 # Appointment Booking System with Voice Agent
 
-This project is a Python-based appointment booking system that uses a voice-enabled agent for interaction. Speech-to-Text (STT) is handled by Deepgram's real-time streaming API, Text-to-Speech (TTS) is performed locally using Piper TTS, and the agent's core logic uses Google's Generative AI models via LangChain.
+This project is a Python-based appointment booking system that uses a voice-enabled agent for interaction. Speech-to-Text (STT) and Text-to-Speech (TTS) are both handled by Deepgram's real-time streaming APIs. The agent's core logic uses Google's Generative AI models via LangChain.
 
 ## Prerequisites
 
 1.  **Python**: Python 3.7+ installed.
 2.  **pip**: Python package installer.
 3.  **Deepgram Account**:
-    *   A Deepgram account is required for Speech-to-Text.
-    *   You'll need a **Deepgram API Key**.
-4.  **Piper TTS Setup**:
-    *   **Piper Executable**: Download the Piper executable suitable for your system from the [Piper GitHub releases page](https://github.com/rhasspy/piper/releases).
-    *   **Piper Voice Model**: Download a voice model for Piper. Each voice consists of an `.onnx` file and a corresponding `.onnx.json` configuration file. You can find voices on [Hugging Face (e.g., rhasspy/piper-voices)](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0).
-    *   You will need to set environment variables pointing to the paths of the executable and these two model files.
-5.  **Audio Hardware**:
+    *   A Deepgram account and a **Deepgram API Key** are required for both Speech-to-Text and Text-to-Speech services.
+4.  **Audio Hardware**:
     *   A working microphone connected to your system for voice input.
     *   Speakers or headphones for audio output.
-6.  **MySQL Database**:
+5.  **MySQL Database**:
     *   A running MySQL server instance.
     *   You need to have a database created and user credentials with permissions to create tables and read/write data. The application will attempt to create the `appointments` table if it doesn't exist.
-7.  **Environment Variables** (to be set, e.g., in a `.env` file):
+6.  **Environment Variables** (to be set, e.g., in a `.env` file):
     *   `GOOGLE_API_KEY`: Your API key for Google Generative AI (e.g., for the Gemini model used by the agent).
-    *   `DEEPGRAM_API_KEY`: Your API key for the Deepgram STT service.
-    *   `PIPER_EXE_PATH`: Full path to the downloaded `piper` executable file.
-    *   `PIPER_MODEL_ONNX_PATH`: Full path to the chosen Piper `.onnx` voice model file.
-    *   `PIPER_MODEL_JSON_PATH`: Full path to the corresponding `.onnx.json` voice configuration file for the chosen model.
+    *   `DEEPGRAM_API_KEY`: Your API key for Deepgram services (used for both STT and TTS).
     *   `MYSQL_HOST`: Hostname of your MySQL server (e.g., `localhost`).
     *   `MYSQL_USER`: MySQL username.
     *   `MYSQL_PASSWORD`: MySQL password.
@@ -49,21 +41,13 @@ This project is a Python-based appointment booking system that uses a voice-enab
     ```bash
     pip install -r requirement.txt
     ```
-    This will install all necessary Python packages, including `deepgram-sdk` for speech-to-text, `piper-tts` (which provides tools related to Piper, though you download the executable separately as per above), `sounddevice` for audio I/O, and libraries for the agent.
+    This will install all necessary Python packages, including `deepgram-sdk` (for both STT and TTS), `sounddevice` for audio I/O, and libraries for the agent (e.g., LangChain, Google Generative AI).
 
-4.  **Download Piper Executable and Voice Model**:
-    *   Download the `piper` executable from [Piper GitHub releases](https://github.com/rhasspy/piper/releases) and place it in a known location.
-    *   Download your chosen `.onnx` voice file and its `.onnx.json` config file from a source like [Hugging Face rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/v1.0.0) and place them in a known location.
-
-5.  **Set Up Environment Variables**:
+4.  **Set Up Environment Variables**:
     Create a `.env` file in the root directory of the project and add your specific configuration:
     ```env
     GOOGLE_API_KEY="your_google_generative_ai_api_key"
-    DEEPGRAM_API_KEY="your_deepgram_api_key"
-
-    PIPER_EXE_PATH="/path/to/your/piper_executable/piper"
-    PIPER_MODEL_ONNX_PATH="/path/to/your/voice_model.onnx"
-    PIPER_MODEL_JSON_PATH="/path/to/your/voice_model.onnx.json"
+    DEEPGRAM_API_KEY="your_deepgram_api_key_for_stt_and_tts"
 
     MYSQL_HOST="localhost"
     MYSQL_USER="your_mysql_user"
@@ -85,15 +69,15 @@ This project is a Python-based appointment booking system that uses a voice-enab
 
 ## How to Use
 
-*   When you run `main.py`, the system will greet you using Piper TTS.
+*   When you run `main.py`, the system will greet you using Deepgram TTS.
 *   The console will display "Listening (Deepgram)..." when it's ready for your voice input.
 *   Speak your command clearly.
 *   The system will transcribe your speech using Deepgram.
-*   The agent will process your request and respond. The response will be spoken aloud using Piper TTS.
+*   The agent will process your request and respond. The response will be spoken aloud using Deepgram TTS.
 *   To quit the application, say "exit".
 
 ## Troubleshooting Audio (Linux)
-If `sounddevice` has issues on Linux (used for both microphone input and Piper audio output), you might need to install system dependencies for PortAudio:
+If `sounddevice` has issues on Linux (used for both microphone input and Deepgram audio output), you might need to install system dependencies for PortAudio:
 ```bash
 sudo apt-get update
 sudo apt-get install libportaudio2 libportaudiocpp0 portaudio19-dev
