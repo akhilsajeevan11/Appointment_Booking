@@ -276,8 +276,7 @@ class TextToSpeechHandler:
             print(f"TTS Playback Error (PortAudioError with Deepgram TTS): {pae}.")
         except Exception as e:
             print(f"Deepgram TTS Error in _speak_async: {e}")
-            else:
-                print(f"Deepgram TTS Error: {e}")
+            raise
 
     def speak(self, text_to_speak: str):
         try:
