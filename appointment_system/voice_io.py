@@ -242,33 +242,37 @@ class TextToSpeechHandler:
 
         print(f"TTS Speaking (Deepgram): {text_to_speak[:60]}{'...' if len(text_to_speak) > 60 else ''}")
 
-        # Source dictionary should ONLY contain 'text'
-        source_payload = {"text": text_to_speak}
+        source_payload = {"text": text_to_speak} # JSON body
+
+        # Options for URL query parameters
+        tts_params = {
+            "model": self.tts_model,
+            "encoding": self.tts_encoding,
+            "sample_rate": self.tts_sample_rate,
+            "container": self.tts_container
+            # "voice": "aura-orion-en", # Example if a specific voice ID is used
+        }
 
         try:
-            # Pass other options as direct keyword arguments
+            # Pass options dictionary as 'params' keyword argument
             response = await self.deepgram_client.speak.v("1").stream(
                 source_payload,
-                model=self.tts_model,
-                encoding=self.tts_encoding,
-                sample_rate=self.tts_sample_rate,
-                container=self.tts_container
-                # Add other valid keyword arguments for the stream method if needed
+                params=tts_params  # This should map to URL query parameters
             )
 
             audio_stream = response.stream
             if audio_stream:
                 chunk_size = 1024 * 4
+                # Ensure sounddevice (sd) is imported at the module level
                 with sd.RawOutputStream(samplerate=self.tts_sample_rate,
                                         channels=1,
                                         dtype='int16',
-                                        device=None) as stream_player: # Ensure sd is imported
+                                        device=None) as stream_player:
                     while True:
                         chunk = await audio_stream.read(chunk_size)
                         if not chunk:
                             break
                         stream_player.write(chunk)
-                # print("Deepgram TTS: Finished playing audio stream.") # Optional debug
             else:
                 print("Deepgram TTS Error: Failed to obtain audio stream from response.")
 
@@ -276,7 +280,6 @@ class TextToSpeechHandler:
             print(f"TTS Playback Error (PortAudioError with Deepgram TTS): {pae}.")
         except Exception as e:
             print(f"Deepgram TTS Error in _speak_async: {e}")
-            raise
 
     def speak(self, text_to_speak: str):
         try:
@@ -292,27 +295,40 @@ class TextToSpeechHandler:
                 raise
 
 if __name__ == '__main__':
-    print("--- Voice I/O Module Test ---")
+    from dotenv import load_dotenv # Import here
+    load_dotenv() # Load .env file from current working directory (project root)
 
-    # Test TextToSpeechHandler (Deepgram TTS)
-    print("\n--- Testing TextToSpeechHandler (Deepgram TTS) ---")
-    dg_api_key_env = os.environ.get("DEEPGRAM_API_KEY")
+    print("--- Voice I/O Module Test (Deepgram STT & Deepgram TTS) ---")
 
-    if not dg_api_key_env:
+    deepgram_api_key_env = os.environ.get("DEEPGRAM_API_KEY") # os should already be imported
+
+    if not deepgram_api_key_env:
         print("CRITICAL ERROR: DEEPGRAM_API_KEY environment variable not set. Cannot run STT or TTS tests.")
     else:
         print(f"Using DEEPGRAM_API_KEY: ...{dg_api_key_env[-4:] if len(dg_api_key_env) > 4 else '...key_is_short'}")
 
         # Create a single DeepgramClient instance for tests
         client_config = DeepgramClientOptions(options={"keepalive": "true"})
-        shared_deepgram_client = DeepgramClient(api_key=dg_api_key_env, config=client_config)
+        shared_deepgram_client = DeepgramClient(api_key=deepgram_api_key_env, config=client_config)
 
         # Test TextToSpeechHandler (Deepgram TTS)
         print("\n--- Testing TextToSpeechHandler (Deepgram TTS) ---")
         try:
-            tts_handler = TextToSpeechHandler(client=shared_deepgram_client, model="aura-asteria-en", sample_rate=24000)
-            tts_handler.speak("Hello from Deepgram Text to Speech, using the Aura model.")
-            tts_handler.speak("This audio is being streamed directly to your speakers.")
+            # Intialize with default model ("aura-asteria-en"), sample_rate (24000Hz for Aura)
+            # These defaults are in TextToSpeechHandler.__init__
+            tts_handler = TextToSpeechHandler(client=shared_deepgram_client)
+
+            print("Attempting to speak a short phrase with Deepgram TTS...")
+            tts_handler.speak("Hello, this is a test of Deepgram Text to Speech.")
+
+            print("Attempting to speak a slightly longer phrase...")
+            tts_handler.speak("This audio should be streamed directly from Deepgram and played in real-time.")
+
+            # Example of using a different voice/model if desired and if handler supports it via params
+            # print("Attempting to speak with a different Aura voice (if available and configured)...")
+            # tts_handler_other_voice = TextToSpeechHandler(client=shared_deepgram_client, model="aura-athena-en") # Example
+            # tts_handler_other_voice.speak("Testing a different voice from Aura.")
+
         except Exception as e:
             print(f"Error during Deepgram TTS test: {e}")
         print("--- Finished Deepgram TTS Test ---")
@@ -321,19 +337,16 @@ if __name__ == '__main__':
         print("\n--- Testing SpeechToTextHandler (Deepgram STT) ---")
         try:
             stt_handler = SpeechToTextHandler(client=shared_deepgram_client)
-            for i in range(1): # Reduced to 1 attempt for brevity
-                print(f"\nSTT Attempt {i+1}/1. Press Enter to start speaking, then speak. (Ctrl+C to skip)")
-                try:
-                    input()
-                    text = stt_handler.listen_and_transcribe()
-                    if text and not text.startswith("ERROR_"):
-                        print(f"--- You said (Deepgram): {text} ---")
-                    else:
-                        print(f"--- No valid transcription from Deepgram. Result: {text} ---")
-                except KeyboardInterrupt: # Catch Ctrl+C during input()
-                    print("\nSTT attempt skipped by user.")
-                    break
-        except KeyboardInterrupt: # Catch Ctrl+C during handler init or loop
+            for i in range(2): # Allow a couple of attempts
+                print(f"\nSTT Attempt {i+1}/2. Press Enter to start speaking, then speak. (Ctrl+C to skip remaining STT tests)")
+                input()
+                print("Recording...") # Give feedback that recording has started after Enter
+                text = stt_handler.listen_and_transcribe()
+                if text and not text.startswith("ERROR_"):
+                    print(f"--- You said (Deepgram): {text} ---")
+                else:
+                    print(f"--- No valid transcription from Deepgram. Result: {text} ---")
+        except KeyboardInterrupt:
             print("\nSkipped remaining STT tests.")
         except Exception as e:
             print(f"Error during Deepgram STT test setup or execution: {e}")
