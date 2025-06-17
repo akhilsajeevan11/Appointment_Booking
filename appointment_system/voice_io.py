@@ -305,7 +305,7 @@ if __name__ == '__main__':
     if not deepgram_api_key_env:
         print("CRITICAL ERROR: DEEPGRAM_API_KEY environment variable not set. Cannot run STT or TTS tests.")
     else:
-        print(f"Using DEEPGRAM_API_KEY: ...{dg_api_key_env[-4:] if len(dg_api_key_env) > 4 else '...key_is_short'}")
+        print("ERROR: DEEPGRAM_API_KEY environment variable is set.")
 
         # Create a single DeepgramClient instance for tests
         client_config = DeepgramClientOptions(options={"keepalive": "true"})
