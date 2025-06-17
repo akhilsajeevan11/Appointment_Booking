@@ -4,6 +4,14 @@ import asyncio
 import threading
 import os
 import queue
+import time
+import numpy as np
+import logging
+from typing import Optional, Callable
+from deepgram import Deepgram, DeepgramLiveConnection
+from deepgram.exceptions import DeepgramApiError
+import httpx
+import json
 # Removed subprocess, shutil, json, Path as they were for Piper TTS
 
 # Configuration constants
@@ -279,18 +287,51 @@ class TextToSpeechHandler:
             else:
                 print(f"Deepgram TTS Error: {e}")
 
-    def speak(self, text_to_speak: str):
+    async def speak(self, text: str):
+        """Speak the given text using Deepgram TTS."""
         try:
-            # Run the async _speak_async method in a blocking way
-            asyncio.run(self._speak_async(text_to_speak))
-        except RuntimeError as re:
-            if "cannot run event loop while another loop is running" in str(re) or \
-               "Nesting asyncio event loops is not supported" in str(re):
-                print(f"TTS Async Error: Could not run speak_async due to existing event loop: {re}")
-                print("This TTS handler needs to be called from a synchronous context or adapted for nested loops if used within another asyncio app.")
-            else:
-                # Re-raise other RuntimeErrors if they are not related to event loop nesting
-                raise
+            print(f"TTS Speaking (Deepgram): {text[:50]}...")
+            
+            # Prepare the request payload
+            payload = {
+                "text": text,
+                "model": "aura-asteria-en",
+                "encoding": "mp3",
+                "container": "mp3",
+                "sample_rate": 24000
+            }
+            
+            # Make the API request
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.deepgram.com/v1/speak",
+                    headers={
+                        "Authorization": f"Token {self.deepgram_client.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=payload,
+                    timeout=30.0
+                )
+                
+                if response.status_code == 200:
+                    # Save the audio to a temporary file
+                    temp_file = "temp_tts.mp3"
+                    with open(temp_file, "wb") as f:
+                        f.write(response.content)
+                    
+                    # Play the audio
+                    self._play_audio(temp_file)
+                    
+                    # Clean up
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                else:
+                    print(f"Deepgram TTS Error: {response.text}")
+                    
+        except Exception as e:
+            print(f"Deepgram TTS Error: {e}")
 
 if __name__ == '__main__':
     print("--- Voice I/O Module Test ---")
