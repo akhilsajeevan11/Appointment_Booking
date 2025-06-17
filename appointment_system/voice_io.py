@@ -98,36 +98,59 @@ class SpeechToTextHandler:
         if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
             self._dg_async_completion_event.set()
 
-    async def _start_and_run_deepgram(self, options: LiveOptions, completion_event: asyncio.Event):
-        self.dg_connection.on("open", self._on_open)
-        self.dg_connection.on("transcript_received", self._on_message)
-        self.dg_connection.on("error", self._on_error)
-        self.dg_connection.on("close", self._on_close)
-
-        print("Deepgram STT: Attempting to start connection with options...")
+    async def _start_and_run_deepgram(self, options, completion_event):
         try:
-            start_status = self.dg_connection.start(options) # Synchronous call
-            print(f"Deepgram STT: dg_connection.start() called. Returned status: {start_status}")
-
-            if isinstance(start_status, bool) and not start_status:
-                print("Deepgram STT Error: start() returned False. Connection failed to initialize properly.")
-                await self._on_error({"message": "Connection start returned false"}, from_start_call=True)
-                completion_event.set()
-            else:
-                print("Deepgram STT: Connection started, awaiting completion signal...")
-                await completion_event.wait()
-                print("Deepgram STT: Completion signal received.")
-
+            self.dg_connection = await DeepgramLiveConnection(options)
+            self._audio_stream_active = True
+            
+            # Start the audio sending task
+            audio_task = asyncio.create_task(self._send_audio_to_deepgram())
+            
+            # Wait for completion event
+            await completion_event.wait()
+            
+            # Clean up
+            if self.dg_connection and self.dg_connection.is_connected():
+                await self.dg_connection.finish()
+            
+            # Cancel the audio sending task
+            audio_task.cancel()
+            try:
+                await audio_task
+            except asyncio.CancelledError:
+                pass
+                
         except Exception as e:
-            print(f"Deepgram STT Error: Exception during Deepgram start or while running: {e}")
-            await self._on_error({"message": f"Exception in _start_and_run_deepgram: {e}"})
-            completion_event.set() # Ensure completion event is set on error
-        finally:
-            print("Deepgram STT: _start_and_run_deepgram coroutine is finishing.")
-        # The audio sending loop is removed from here and managed by the SDK or higher level logic if start is blocking
-        # If start() is non-blocking and needs an explicit send loop, that would be different.
-        # Based on the problem (await bool), start() is sync. The callbacks manage completion.
+            print(f"Error in _start_and_run_deepgram: {e}")
+            self._audio_stream_active = False
+            if not self.transcript_ready_event.is_set():
+                self.transcript_ready_event.set()
 
+    async def _send_audio_to_deepgram(self):
+        try:
+            while self._audio_stream_active:
+                try:
+                    audio_chunk = await asyncio.get_event_loop().run_in_executor(None, self._audio_buffer.get, True, 0.1)
+                    if audio_chunk is None:
+                        print("Deepgram: Sentinel received, stopping audio sending.")
+                        break
+                    if not self.dg_connection.send(audio_chunk):
+                        print("Deepgram: Failed to send audio, connection might be closing.")
+                        self._audio_stream_active = False
+                        break
+                except queue.Empty:
+                    if not self._audio_stream_active: 
+                        break
+                    continue
+                except Exception as e:
+                    print(f"Deepgram: Error in audio sending loop: {e}")
+                    self._audio_stream_active = False
+                    break
+        finally:
+            print("Deepgram: Audio sending loop finished or exited.")
+            if self.dg_connection and self.dg_connection.is_connected():
+                print("Deepgram: Proactively finishing connection from client side after audio sending.")
+                await self.dg_connection.finish()
 
     def _run_deepgram_in_thread(self):
         try:
@@ -145,47 +168,9 @@ class SpeechToTextHandler:
             # Pass the event to the async function
             loop.run_until_complete(self._start_and_run_deepgram(options, self._dg_async_completion_event))
         except Exception as e:
-                try:
-                    audio_chunk = await asyncio.get_event_loop().run_in_executor(None, self._audio_buffer.get, True, 0.1)
-                    if audio_chunk is None:
-                        print("Deepgram: Sentinel received, stopping audio sending.")
-                        break
-                    if not self.dg_connection.send(audio_chunk):
-                        print("Deepgram: Failed to send audio, connection might be closing.")
-                        self._audio_stream_active = False
-                        break
-                except queue.Empty:
-                    if not self._audio_stream_active: break
-                    continue
-                except Exception as e:
-                    print(f"Deepgram: Error in audio sending loop: {e}")
-                    self._audio_stream_active = False
-                    break
-        finally:
-            print("Deepgram: Audio sending loop finished or exited.")
-            if self.dg_connection and self.dg_connection.is_connected():
-                print("Deepgram: Proactively finishing connection from client side after audio sending.")
-                await self.dg_connection.finish()
-
-    def _run_deepgram_in_thread(self):
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            options = LiveOptions(
-                model="nova-2", language="en-US", smart_format=True,
-                encoding="linear16", sample_rate=SAMPLE_RATE, channels=1,
-                interim_results=True, utterance_end_ms="1000",
-            )
-            loop.run_until_complete(self._start_and_run_deepgram(options))
-        except Exception as e:
             print(f"Critical error in Deepgram thread: {e}")
             self.final_transcript = "ERROR_DEEPGRAM_THREAD_CRASH"
             if not self.transcript_ready_event.is_set():
-                self.transcript_ready_event.set()
-        finally:
-            print(f"Critical error in Deepgram thread: {e}")
-            self.final_transcript = "ERROR_DEEPGRAM_THREAD_CRASH"
-            if not self.transcript_ready_event.is_set(): # Ensure main thread is signaled
                 self.transcript_ready_event.set()
         finally:
             print("Deepgram: _run_deepgram_in_thread finished.")
