@@ -1,6 +1,7 @@
-import os # Add this import
+import os
 from appointment_system.agent import AppointmentAgent, CS_INITIAL_GREETING
 from appointment_system.voice_io import SpeechToTextHandler, TextToSpeechHandler
+from deepgram import DeepgramClient, DeepgramClientOptions # Added for shared client
 
 def main():
     print("Welcome to the Appointment Booking System!")
@@ -20,10 +21,14 @@ def main():
     # if not all([...]):
     # ... (check for piper paths removed)
 
+    # Create a single DeepgramClient instance
+    client_config = DeepgramClientOptions(options={"keepalive": "true"}) # Or other global options
+    deepgram_client = DeepgramClient(api_key=deepgram_api_key, config=client_config)
+
     try:
-        stt_handler = SpeechToTextHandler(deepgram_api_key=deepgram_api_key)
-        # Initialize TextToSpeechHandler with Deepgram API Key
-        tts_handler = TextToSpeechHandler(deepgram_api_key=deepgram_api_key)
+        stt_handler = SpeechToTextHandler(client=deepgram_client)
+        # Initialize TextToSpeechHandler with the shared Deepgram client
+        tts_handler = TextToSpeechHandler(client=deepgram_client)
     except Exception as e:
         print(f"Error initializing voice handlers (STT or TTS): {e}")
         return

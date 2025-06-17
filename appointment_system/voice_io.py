@@ -11,12 +11,12 @@ SAMPLE_RATE = 16000 # This is for STT (Deepgram)
 SD_CHUNK_SIZE = int(SAMPLE_RATE / 10) # 100ms for sounddevice RawInputStream with STT
 
 class SpeechToTextHandler:
-    def __init__(self, deepgram_api_key):
-        if not deepgram_api_key:
-            raise ValueError("Deepgram API key is required for SpeechToTextHandler.")
-
-        config = DeepgramClientOptions(options={"keepalive": "true"})
-        self.deepgram_client = DeepgramClient(api_key=deepgram_api_key, config=config)
+    def __init__(self, client: DeepgramClient): # Changed parameter
+        self.deepgram_client = client # Use passed client
+        # if not deepgram_api_key: # Removed API key check, client is now passed
+        #     raise ValueError("Deepgram API key is required for SpeechToTextHandler.")
+        # config = DeepgramClientOptions(options={"keepalive": "true"}) # Client created outside
+        # self.deepgram_client = DeepgramClient(api_key=deepgram_api_key, config=config)
 
         self.final_transcript = ""
         self.interim_transcript = ""
@@ -98,59 +98,36 @@ class SpeechToTextHandler:
         if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
             self._dg_async_completion_event.set()
 
-    async def _start_and_run_deepgram(self, options, completion_event):
-        try:
-            self.dg_connection = await DeepgramLiveConnection(options)
-            self._audio_stream_active = True
-            
-            # Start the audio sending task
-            audio_task = asyncio.create_task(self._send_audio_to_deepgram())
-            
-            # Wait for completion event
-            await completion_event.wait()
-            
-            # Clean up
-            if self.dg_connection and self.dg_connection.is_connected():
-                await self.dg_connection.finish()
-            
-            # Cancel the audio sending task
-            audio_task.cancel()
-            try:
-                await audio_task
-            except asyncio.CancelledError:
-                pass
-                
-        except Exception as e:
-            print(f"Error in _start_and_run_deepgram: {e}")
-            self._audio_stream_active = False
-            if not self.transcript_ready_event.is_set():
-                self.transcript_ready_event.set()
+    async def _start_and_run_deepgram(self, options: LiveOptions, completion_event: asyncio.Event):
+        self.dg_connection.on("open", self._on_open)
+        self.dg_connection.on("transcript_received", self._on_message)
+        self.dg_connection.on("error", self._on_error)
+        self.dg_connection.on("close", self._on_close)
 
-    async def _send_audio_to_deepgram(self):
+        print("Deepgram STT: Attempting to start connection with options...")
         try:
-            while self._audio_stream_active:
-                try:
-                    audio_chunk = await asyncio.get_event_loop().run_in_executor(None, self._audio_buffer.get, True, 0.1)
-                    if audio_chunk is None:
-                        print("Deepgram: Sentinel received, stopping audio sending.")
-                        break
-                    if not self.dg_connection.send(audio_chunk):
-                        print("Deepgram: Failed to send audio, connection might be closing.")
-                        self._audio_stream_active = False
-                        break
-                except queue.Empty:
-                    if not self._audio_stream_active: 
-                        break
-                    continue
-                except Exception as e:
-                    print(f"Deepgram: Error in audio sending loop: {e}")
-                    self._audio_stream_active = False
-                    break
+            start_status = self.dg_connection.start(options) # Synchronous call
+            print(f"Deepgram STT: dg_connection.start() called. Returned status: {start_status}")
+
+            if isinstance(start_status, bool) and not start_status:
+                print("Deepgram STT Error: start() returned False. Connection failed to initialize properly.")
+                await self._on_error({"message": "Connection start returned false"}, from_start_call=True)
+                completion_event.set()
+            else:
+                print("Deepgram STT: Connection started, awaiting completion signal...")
+                await completion_event.wait()
+                print("Deepgram STT: Completion signal received.")
+
+        except Exception as e:
+            print(f"Deepgram STT Error: Exception during Deepgram start or while running: {e}")
+            await self._on_error({"message": f"Exception in _start_and_run_deepgram: {e}"})
+            completion_event.set() # Ensure completion event is set on error
         finally:
-            print("Deepgram: Audio sending loop finished or exited.")
-            if self.dg_connection and self.dg_connection.is_connected():
-                print("Deepgram: Proactively finishing connection from client side after audio sending.")
-                await self.dg_connection.finish()
+            print("Deepgram STT: _start_and_run_deepgram coroutine is finishing.")
+        # The audio sending loop is removed from here and managed by the SDK or higher level logic if start is blocking
+        # If start() is non-blocking and needs an explicit send loop, that would be different.
+        # Based on the problem (await bool), start() is sync. The callbacks manage completion.
+
 
     def _run_deepgram_in_thread(self):
         try:
@@ -167,11 +144,14 @@ class SpeechToTextHandler:
             )
             # Pass the event to the async function
             loop.run_until_complete(self._start_and_run_deepgram(options, self._dg_async_completion_event))
-        except Exception as e:
-            print(f"Critical error in Deepgram thread: {e}")
+        except Exception as e: # This is the correct handler for errors in loop.run_until_complete or _start_and_run_deepgram
+            print(f"Critical error in Deepgram thread execution: {e}")
             self.final_transcript = "ERROR_DEEPGRAM_THREAD_CRASH"
-            if not self.transcript_ready_event.is_set():
+            if not self.transcript_ready_event.is_set(): # Ensure main thread is signaled
                 self.transcript_ready_event.set()
+            # Also ensure the async completion event is set if the error happened before it was naturally set
+            if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
+                self._dg_async_completion_event.set()
         finally:
             print("Deepgram: _run_deepgram_in_thread finished.")
 
@@ -238,14 +218,14 @@ class SpeechToTextHandler:
 
 # --- TextToSpeechHandler class (Deepgram TTS) ---
 class TextToSpeechHandler:
-    def __init__(self, deepgram_api_key: str, model: str = "aura-asteria-en",
+    def __init__(self, client: DeepgramClient, model: str = "aura-asteria-en",
                  sample_rate: int = 24000, encoding: str = "linear16",
-                 container: str = "none"):
-        if not deepgram_api_key:
-            raise ValueError("Deepgram API key is required for TextToSpeechHandler.")
-
-        client_config = DeepgramClientOptions(options={"keepalive": "true"})
-        self.deepgram_client = DeepgramClient(api_key=deepgram_api_key, config=client_config)
+                 container: str = "none"): # Changed first parameter
+        self.deepgram_client = client # Use passed client
+        # if not deepgram_api_key: # Removed API key check
+        #     raise ValueError("Deepgram API key is required for TextToSpeechHandler.")
+        # client_config = DeepgramClientOptions(options={"keepalive": "true"}) # Client created outside
+        # self.deepgram_client = DeepgramClient(api_key=deepgram_api_key, config=client_config)
 
         self.tts_model = model
         self.tts_sample_rate = sample_rate
@@ -262,19 +242,19 @@ class TextToSpeechHandler:
 
         print(f"TTS Speaking (Deepgram): {text_to_speak[:60]}{'...' if len(text_to_speak) > 60 else ''}")
 
-        # Move options into the source dictionary
-        source_with_options = {
-            "text": text_to_speak,
-            "model": self.tts_model,
-            "encoding": self.tts_encoding,
-            "sample_rate": self.tts_sample_rate,
-            "container": self.tts_container
-            # Add other parameters like "voice" here if needed
-        }
+        # Source dictionary should ONLY contain 'text'
+        source_payload = {"text": text_to_speak}
 
         try:
-            # Call stream() with only the source dictionary
-            response = await self.deepgram_client.speak.v("1").stream(source_with_options)
+            # Pass other options as direct keyword arguments
+            response = await self.deepgram_client.speak.v("1").stream(
+                source_payload,
+                model=self.tts_model,
+                encoding=self.tts_encoding,
+                sample_rate=self.tts_sample_rate,
+                container=self.tts_container
+                # Add other valid keyword arguments for the stream method if needed
+            )
 
             audio_stream = response.stream
             if audio_stream:
@@ -282,24 +262,20 @@ class TextToSpeechHandler:
                 with sd.RawOutputStream(samplerate=self.tts_sample_rate,
                                         channels=1,
                                         dtype='int16',
-                                        device=None) as stream_player:
+                                        device=None) as stream_player: # Ensure sd is imported
                     while True:
                         chunk = await audio_stream.read(chunk_size)
                         if not chunk:
                             break
                         stream_player.write(chunk)
-                print("Deepgram TTS: Finished speaking.") # Moved inside if audio_stream
+                # print("Deepgram TTS: Finished playing audio stream.") # Optional debug
             else:
-                print("Deepgram TTS Error: Failed to obtain audio stream.")
-
+                print("Deepgram TTS Error: Failed to obtain audio stream from response.")
 
         except sd.PortAudioError as pae:
             print(f"TTS Playback Error (PortAudioError with Deepgram TTS): {pae}.")
         except Exception as e:
-            # Check if the error message is about unexpected keyword arguments again
-            if "got an unexpected keyword argument" in str(e) or "Unknown parameter" in str(e):
-                print(f"Deepgram TTS Error (Parameter issue likely): {e}")
-                print("This might indicate that options like 'model', 'encoding', etc. are still not correctly structured for the speak.stream API call.")
+            print(f"Deepgram TTS Error in _speak_async: {e}")
             else:
                 print(f"Deepgram TTS Error: {e}")
 
@@ -322,36 +298,30 @@ if __name__ == '__main__':
     # Test TextToSpeechHandler (Deepgram TTS)
     print("\n--- Testing TextToSpeechHandler (Deepgram TTS) ---")
     dg_api_key_env = os.environ.get("DEEPGRAM_API_KEY")
+
     if not dg_api_key_env:
-        print("Skipping Deepgram TTS test: DEEPGRAM_API_KEY environment variable not set.")
+        print("CRITICAL ERROR: DEEPGRAM_API_KEY environment variable not set. Cannot run STT or TTS tests.")
     else:
+        print(f"Using DEEPGRAM_API_KEY: ...{dg_api_key_env[-4:] if len(dg_api_key_env) > 4 else '...key_is_short'}")
+
+        # Create a single DeepgramClient instance for tests
+        client_config = DeepgramClientOptions(options={"keepalive": "true"})
+        shared_deepgram_client = DeepgramClient(api_key=dg_api_key_env, config=client_config)
+
+        # Test TextToSpeechHandler (Deepgram TTS)
+        print("\n--- Testing TextToSpeechHandler (Deepgram TTS) ---")
         try:
-            # Example with default Aura model (aura-asteria-en, 24000 Hz)
-            # If using a different model, ensure sample_rate matches.
-            # For "aura-luna-en" or "aura-stella-en", sample_rate is often 16000.
-            # Check Deepgram model documentation for correct sample rates.
-            tts_handler = TextToSpeechHandler(deepgram_api_key=dg_api_key_env, model="aura-asteria-en", sample_rate=24000)
+            tts_handler = TextToSpeechHandler(client=shared_deepgram_client, model="aura-asteria-en", sample_rate=24000)
             tts_handler.speak("Hello from Deepgram Text to Speech, using the Aura model.")
             tts_handler.speak("This audio is being streamed directly to your speakers.")
-
-            # Example for a model that might use 16000 Hz
-            # print("\nTesting with a 16kHz Aura model (example, ensure model name is correct if used)")
-            # tts_handler_16khz = TextToSpeechHandler(deepgram_api_key=dg_api_key_env, model="aura-luna-en", sample_rate=16000)
-            # tts_handler_16khz.speak("This is a test with Luna at sixteen kilohertz.")
-
         except Exception as e:
             print(f"Error during Deepgram TTS test: {e}")
-    print("--- Finished Deepgram TTS Test ---")
+        print("--- Finished Deepgram TTS Test ---")
 
-
-    # Test SpeechToTextHandler (Deepgram STT)
-    print("\n--- Testing SpeechToTextHandler (Deepgram STT) ---")
-    # dg_api_key_env is already fetched from above
-    if not dg_api_key_env: # Check again in case only TTS was skipped
-        print("Skipping Deepgram STT test: DEEPGRAM_API_KEY environment variable not set.")
-    else:
+        # Test SpeechToTextHandler (Deepgram STT)
+        print("\n--- Testing SpeechToTextHandler (Deepgram STT) ---")
         try:
-            stt_handler = SpeechToTextHandler(deepgram_api_key=dg_api_key_env)
+            stt_handler = SpeechToTextHandler(client=shared_deepgram_client)
             for i in range(1): # Reduced to 1 attempt for brevity
                 print(f"\nSTT Attempt {i+1}/1. Press Enter to start speaking, then speak. (Ctrl+C to skip)")
                 try:
