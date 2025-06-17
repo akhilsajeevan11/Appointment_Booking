@@ -1,14 +1,27 @@
+import os # Add this import
 from appointment_system.agent import AppointmentAgent, CS_INITIAL_GREETING
-# Corrected import: only one line for TextToSpeechHandler and SpeechToTextHandler
 from appointment_system.voice_io import SpeechToTextHandler, TextToSpeechHandler
 
 def main():
     print("Welcome to the Appointment Booking System!")
     print("Say 'exit' to quit.\n")
-    
+
+    # Initialize Deepgram API Key for STT
+    deepgram_api_key = os.environ.get("DEEPGRAM_API_KEY")
+    if not deepgram_api_key:
+        error_message = "Error: DEEPGRAM_API_KEY environment variable not set. Cannot initialize Speech-to-Text."
+        print(error_message)
+        try:
+            # Attempt to use TTS for this critical startup error
+            tts_handler_startup_error = TextToSpeechHandler()
+            tts_handler_startup_error.speak(error_message + " Please set the key and restart.")
+        except Exception as tts_init_error:
+            print(f"TTS handler could not be initialized to speak the error: {tts_init_error}")
+        return # Exit if Deepgram key is missing
+
     agent = AppointmentAgent().create_agent()
-    stt_handler = SpeechToTextHandler()
-    tts_handler = TextToSpeechHandler()
+    stt_handler = SpeechToTextHandler(deepgram_api_key=deepgram_api_key)
+    tts_handler = TextToSpeechHandler() # Google TTS remains, uses ADC
     
     # Initialize state
     state = {
@@ -30,13 +43,14 @@ def main():
     while True:
         user_input = stt_handler.listen_and_transcribe().strip()
 
+        # Check for specific error strings from the STT handler
         if user_input == "ERROR_AUDIO_DEVICE":
             error_message = "There seems to be an issue with your audio input device. Please check your microphone and ensure permissions are correct. Exiting."
             print(f"Agent: {error_message}")
-            # No TTS here as audio output might also be affected.
+            # No TTS here as audio input itself failed.
             break
-        elif user_input == "ERROR_STT_SERVICE":
-            error_message = "Sorry, I'm having trouble with the speech recognition service right now. Please try again in a moment."
+        elif user_input.startswith("ERROR_DEEPGRAM_"): # Catch all Deepgram specific errors
+            error_message = f"Sorry, I'm having trouble with the speech recognition service ({user_input}). Please try again in a moment."
             print(f"Agent: {error_message}")
             tts_handler.speak(error_message)
             continue

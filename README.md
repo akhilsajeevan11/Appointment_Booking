@@ -1,26 +1,29 @@
 # Appointment Booking System with Voice Agent
 
-This project is a Python-based appointment booking system that uses a voice-enabled agent for interaction. Users can speak to the system to book new appointments or view existing ones. The agent utilizes Google's Generative AI. Speech-to-Text is streamed from the user's microphone, and the agent's voice responses are also streamed for lower latency, providing a more real-time conversational experience.
+This project is a Python-based appointment booking system that uses a voice-enabled agent for interaction. Users can speak to the system to book new appointments or view existing ones. The agent utilizes Google's Generative AI. Speech-to-Text is provided by Deepgram's real-time streaming API, and the agent's voice responses (Text-to-Speech) are generated using Google Cloud TTS and streamed for lower latency, providing a more real-time conversational experience.
 
 ## Prerequisites
 
 1.  **Python**: Python 3.7+ installed.
 2.  **pip**: Python package installer.
-3.  **Google Cloud Platform (GCP) Project**:
+3.  **Deepgram Account**:
+    *   A Deepgram account and an API key for their Speech-to-Text service.
+4.  **Google Cloud Platform (GCP) Project** (for Text-to-Speech):
     *   A valid GCP project.
-    *   Enable the **Cloud Speech-to-Text API** and **Cloud Text-to-Speech API** for your project.
-    *   **Authentication**: Set up Application Default Credentials (ADC). The easiest way for local development is to install the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) and run:
+    *   Enable the **Cloud Text-to-Speech API** for your project (Speech-to-Text is now handled by Deepgram).
+    *   **Authentication (for Google Cloud Text-to-Speech)**: Set up Application Default Credentials (ADC). The easiest way for local development is to install the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) and run:
         ```bash
         gcloud auth application-default login
         ```
-        This will store credentials locally that the Python client libraries can automatically pick up.
-4.  **Audio Hardware**:
+        This will store credentials locally that the Google Cloud client libraries can automatically pick up for TTS.
+5.  **Audio Hardware**:
     *   A working microphone connected to your system for voice input.
     *   Speakers or headphones for audio output.
-5.  **MySQL Database**:
+6.  **MySQL Database**:
     *   A running MySQL server instance.
     *   You need to have a database created and user credentials with permissions to create tables and read/write data. The application will attempt to create the `appointments` table if it doesn't exist within the specified database.
-6.  **Environment Variables**:
+7.  **Environment Variables**:
+    *   `DEEPGRAM_API_KEY`: Your API key for the Deepgram Speech-to-Text service.
     *   `GOOGLE_API_KEY`: An API key for the Google Generative AI service (e.g., Gemini) used by the appointment agent.
     *   `MYSQL_HOST`: Hostname of your MySQL server (e.g., `localhost`).
     *   `MYSQL_USER`: MySQL username.
@@ -46,11 +49,12 @@ This project is a Python-based appointment booking system that uses a voice-enab
     ```bash
     pip install -r requirement.txt
     ```
-    This will install all necessary Python packages, including the Google Cloud client libraries, and `sounddevice` which is used for both microphone input and streaming audio playback. Libraries for the agent are also included. (`playsound` is also included in `requirement.txt` but primary audio I/O is handled by `sounddevice`).
+    This will install all necessary Python packages, including `deepgram-sdk` for speech-to-text, `google-cloud-texttospeech` for text-to-speech, and `sounddevice` which is used for both microphone input and streaming audio playback. Libraries for the agent are also included. (`playsound` is another audio library present in `requirement.txt` but `sounddevice` handles primary audio I/O).
 
 4.  **Set Up Environment Variables**:
     Create a `.env` file in the root directory of the project and add your specific configuration:
     ```env
+    DEEPGRAM_API_KEY="your_deepgram_api_key"
     GOOGLE_API_KEY="your_google_generative_ai_api_key"
     MYSQL_HOST="localhost"
     MYSQL_USER="your_mysql_user"
