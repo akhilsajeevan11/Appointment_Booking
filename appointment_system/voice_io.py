@@ -3,9 +3,10 @@ from deepgram import (
     DeepgramClient,
     DeepgramClientOptions
 )
-# from deepgram.clients.listen.live.v1options import LiveOptions # Old
-from deepgram.clients.listen.websocket.v1.options import ListenWebSocketOptions
-from deepgram.clients.listen.websocket.v1.response import ListenWebSocketResponse # For _on_message type hint if used
+# Removed: from deepgram.clients.listen.websocket.v1.options import ListenWebSocketOptions
+# Removed: from deepgram.clients.listen.websocket.v1.response import ListenWebSocketResponse
+# LiveOptions might still be imported from the top if it was there from listen.live, but it's not used for websocket.
+# For this change, we ensure the problematic websocket-specific option/response classes are not imported.
 import asyncio
 import threading
 import os
@@ -25,7 +26,7 @@ class SpeechToTextHandler:
         self.transcript_ready_event: threading.Event = threading.Event()
         self._dg_async_completion_event: asyncio.Event = None
 
-        self.dg_connection = None # Will be ListenWebSocketClient instance
+        self.dg_connection = None
         self._audio_stream_active: bool = False
         self._audio_buffer: queue.Queue = queue.Queue()
         self._deepgram_thread = None
@@ -37,12 +38,11 @@ class SpeechToTextHandler:
         if self._audio_stream_active:
             self._audio_buffer.put(bytes(indata))
 
-    async def _on_open(self, connection, open_response, **kwargs): # connection is self.dg_connection
+    async def _on_open(self, dg_connection_instance, open_response, **kwargs):
         print(f"Deepgram STT (WebSocket): Connection Open: {open_response}")
 
-    async def _on_message(self, connection, result: ListenWebSocketResponse, **kwargs): # result is often a dict
+    async def _on_message(self, dg_connection_instance, result, **kwargs):
         try:
-            # The result object from listen.websocket is a dict (parsed JSON).
             message_type = result.get("type")
 
             if message_type == "Results":
@@ -53,31 +53,27 @@ class SpeechToTextHandler:
 
                 if transcript:
                     if is_final:
-                        # Accumulate final segments; some models send word-by-word is_final
                         self._current_utterance_final_transcript += transcript
-                        # Add a space if the segment likely needs one, based on if it's a new word.
-                        # This simple space adding might not be perfect for all models/languages.
-                        if transcript and not transcript.isspace():
-                             self._current_utterance_final_transcript += " "
+                        if not transcript.endswith(" ") and transcript: # Add space if segment doesn't end with one
+                            self._current_utterance_final_transcript += " "
 
                         if speech_final:
                             self.final_transcript = self._current_utterance_final_transcript.strip()
                             self._current_utterance_final_transcript = ""
                             if self.interim_transcript:
-                                print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='') # Clear line
+                                print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='')
                             print(f"STT Final (Deepgram WebSocket): {self.final_transcript}")
                             self.interim_transcript = ""
                             if not self.transcript_ready_event.is_set(): self.transcript_ready_event.set()
                             if self._dg_async_completion_event and not self._dg_async_completion_event.is_set(): self._dg_async_completion_event.set()
-                        else: # is_final but not speech_final
+                        else:
                             if self.interim_transcript: print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='')
                             self.interim_transcript = self._current_utterance_final_transcript.strip()
                             print(f"STT Update (Deepgram WebSocket): {self.interim_transcript}", end='')
-                    else: # Not is_final (interim result)
+                    else:
                         if self.interim_transcript: print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='')
-                        # For interim, display accumulated final parts + current interim segment
-                        display_interim = self._current_utterance_final_transcript + transcript
-                        self.interim_transcript = display_interim.strip()
+                        current_segment_interim = self._current_utterance_final_transcript + transcript
+                        self.interim_transcript = current_segment_interim.strip()
                         print(f"STT Interim (Deepgram WebSocket): {self.interim_transcript}", end='')
 
             elif message_type == "Metadata":
@@ -90,21 +86,21 @@ class SpeechToTextHandler:
         except Exception as e:
             print(f"Error processing Deepgram STT message (WebSocket): {e} - Result: {result}")
 
-    async def _on_error(self, connection, error, **kwargs):
+    async def _on_error(self, dg_connection_instance, error, **kwargs):
         error_message_detail = str(error.get('message') if isinstance(error, dict) else error)
         self.final_transcript = f"ERROR_DEEPGRAM_STT_WS: {error_message_detail}"
         print(f"Deepgram STT Error (WebSocket): {error_message_detail}")
         if not self.transcript_ready_event.is_set(): self.transcript_ready_event.set()
         if self._dg_async_completion_event and not self._dg_async_completion_event.is_set(): self._dg_async_completion_event.set()
 
-    async def _on_close(self, connection, code: int, reason: str, **kwargs):
-        print(f"Deepgram STT Connection Closed (WebSocket): Code {code}, Reason: {reason}")
-        # If connection closed before speech_final, finalize with what we have
-        if self._current_utterance_final_transcript and not self.final_transcript.startswith("ERROR_"):
-            self.final_transcript = self._current_utterance_final_transcript.strip()
-            print(f"STT Final (Deepgram WebSocket - on close): {self.final_transcript}")
-        elif not self.final_transcript: # If no transcript and no error set yet
-            self.final_transcript = "ERROR_DEEPGRAM_CLOSED_UNEXPECTEDLY_WS"
+    async def _on_close(self, dg_connection_instance, close_code, close_reason, **kwargs):
+        print(f"Deepgram STT Connection Closed (WebSocket): Code {close_code}, Reason: {close_reason}")
+        if self._current_utterance_final_transcript and not self.final_transcript.startswith("ERROR_") and not self.final_transcript : # Finalize if any pending transcript
+             self.final_transcript = self._current_utterance_final_transcript.strip()
+             print(f"STT Final (Deepgram WebSocket - on close): {self.final_transcript}")
+        elif not self.final_transcript : # If no transcript and no error set yet
+             self.final_transcript = "ERROR_DEEPGRAM_CLOSED_UNEXPECTEDLY_WS"
+        self._current_utterance_final_transcript = ""
 
         if not self.transcript_ready_event.is_set(): self.transcript_ready_event.set()
         if self._dg_async_completion_event and not self._dg_async_completion_event.is_set(): self._dg_async_completion_event.set()
@@ -115,13 +111,14 @@ class SpeechToTextHandler:
             asyncio.set_event_loop(loop)
             self._dg_async_completion_event = asyncio.Event()
 
-            options = ListenWebSocketOptions(
-                model="nova-2", language="en-US", smart_format=True,
-                encoding="linear16", sample_rate=SAMPLE_RATE, channels=1,
-                interim_results=True, utterance_end_ms="1000", # Consider making this configurable
-                vad_events=True
-            )
-            loop.run_until_complete(self._start_and_run_deepgram(options, self._dg_async_completion_event))
+            # Create options as a dictionary for listen.websocket
+            options_dict = {
+                "model": "nova-2", "language": "en-US", "smart_format": True,
+                "encoding": "linear16", "sample_rate": SAMPLE_RATE, "channels": 1,
+                "interim_results": True, "utterance_end_ms": "1000",
+                "vad_events": True
+            }
+            loop.run_until_complete(self._start_and_run_deepgram(options_dict, self._dg_async_completion_event))
         except Exception as e:
             print(f"Critical error in Deepgram STT thread (WebSocket): {e}")
             self.final_transcript = "ERROR_DEEPGRAM_THREAD_CRASH_WS"
@@ -130,51 +127,38 @@ class SpeechToTextHandler:
         finally:
             print("Deepgram STT (WebSocket): _run_deepgram_in_thread finished.")
 
-    async def _start_and_run_deepgram(self, options: ListenWebSocketOptions, completion_event: asyncio.Event):
+    async def _start_and_run_deepgram(self, options_dict: dict, completion_event: asyncio.Event):
         self.dg_connection.on("open", self._on_open)
         self.dg_connection.on("message", self._on_message)
-        # self.dg_connection.on("results", self._on_message) # 'message' event should cover 'Results' type
         self.dg_connection.on("error", self._on_error)
         self.dg_connection.on("close", self._on_close)
-        self.dg_connection.on("metadata", lambda connection, metadata, **kwargs: print(f"STT Meta (WS): {metadata.get('request_id')}"))
-        self.dg_connection.on("speech_started", lambda connection, speech_started, **kwargs: print("STT Speech Started (WS)"))
-        self.dg_connection.on("utterance_end", lambda connection, utterance_end, **kwargs: print("STT Utterance Ended (WS)"))
+        # self.dg_connection.on("metadata", lambda conn, metadata, **kwargs: print(f"STT Meta: {metadata}"))
+        # self.dg_connection.on("speech_started", lambda conn, speech_started, **kwargs: print("STT Speech Started"))
+        # self.dg_connection.on("utterance_end", lambda conn, utterance_end, **kwargs: print("STT Utterance Ended"))
 
-        print("Deepgram STT (WebSocket): Attempting to start connection...")
+
+        print("Deepgram STT (WebSocket): Attempting to start connection with options:", options_dict)
         try:
-            options_dict = options.to_dict() if hasattr(options, 'to_dict') else vars(options)
+            # Unpack the options dictionary as keyword arguments
+            await self.dg_connection.start(**options_dict)
 
-            # For listen.websocket.v1, start() is async and should be awaited.
-            # This call itself will run the connection and only complete when the connection is closed.
-            await self.dg_connection.start(options_dict)
-
-            print("Deepgram STT (WebSocket): Connection `start()` method completed (implies connection closed or error).")
-            # If start() completes, it means the connection lifecycle is done.
-            # The completion_event should have been set by on_close or on_error.
-            # We can await it here with a small timeout as a final check or if start() returns prematurely.
-            await asyncio.wait_for(completion_event.wait(), timeout=5.0)
+            print("Deepgram STT (WebSocket): Connection `start()` method completed (implies connection naturally closed or error).")
+            await asyncio.wait_for(completion_event.wait(), timeout=10.0)
             print("Deepgram STT (WebSocket): Completion signal processed after start() returned.")
-
         except asyncio.TimeoutError:
             print("Deepgram STT (WebSocket): Timeout waiting for completion signal after start() returned. This might be okay if connection closed normally.")
         except Exception as e:
             print(f"Deepgram STT Error (WebSocket): Exception during start or while running: {e}")
-            if not completion_event.is_set(): completion_event.set()
         finally:
-            print("Deepgram STT (WebSocket): _start_and_run_deepgram coroutine finishing.")
-            # Connection should be closed by `await self.dg_connection.start()` completing.
-            # Explicitly calling finish() here might be redundant or cause issues if called on an already closing connection.
-            # However, if start() was not awaited or if it's non-blocking, finish() is crucial.
-            # Given `await start()`, this finish call is more of a safeguard.
+            print("Deepgram STT (WebSocket): _start_and_run_deepgram coroutine finishing. Ensuring connection is closed.")
             if self.dg_connection and not self.dg_connection.finished:
                 try:
                     await self.dg_connection.finish()
                     print("Deepgram STT (WebSocket): Connection finished via finally block.")
                 except Exception as e_finish:
                     print(f"Deepgram STT (WebSocket): Error during finish() in finally: {e_finish}")
-            if not completion_event.is_set(): # Ensure completion event is set
+            if not completion_event.is_set():
                 completion_event.set()
-
 
     def listen_and_transcribe(self):
         self.final_transcript = ""
@@ -187,7 +171,7 @@ class SpeechToTextHandler:
             try: self._audio_buffer.get_nowait()
             except queue.Empty: break
 
-        self._deepgram_thread = None # Ensure it's reset
+        self._deepgram_thread = None
         try:
             self.dg_connection = self.deepgram_client.listen.websocket.v("1")
 
@@ -203,49 +187,39 @@ class SpeechToTextHandler:
                 while self._audio_stream_active and not self.transcript_ready_event.is_set():
                     try:
                         audio_chunk = self._audio_buffer.get(timeout=0.1)
-                        if audio_chunk is None:
-                            self._audio_stream_active = False; break
-                        if self.dg_connection and self.dg_connection.websocket: # Check if websocket is connected
+                        if audio_chunk is None: self._audio_stream_active = False; break
+                        if self.dg_connection and self.dg_connection.websocket:
                             if self.dg_connection.send(audio_chunk) is False:
                                 print("Deepgram STT (WebSocket): send returned false. Stopping audio send.")
                                 self._audio_stream_active = False; break
                         elif not self.dg_connection or not self.dg_connection.websocket:
-                            print("Deepgram STT (WebSocket): Connection not available for sending audio.")
-                            self._audio_stream_active = False; break
+                             print("Deepgram STT (WebSocket): Connection not available for sending audio.")
+                             self._audio_stream_active = False; break
                     except queue.Empty: continue
 
             self._audio_stream_active = False
-            # Signal end of audio stream to Deepgram if connection is still open by sending empty bytes
-            # This is not standard for Deepgram SDK; usually, just stopping send and calling finish() is enough.
-            # if self.dg_connection and self.dg_connection.websocket:
-            #    self.dg_connection.send(b'')
+            self._audio_buffer.put(None)
 
             timeout_seconds = 30
             if not self.transcript_ready_event.wait(timeout=timeout_seconds):
                 print(f"Deepgram STT (WebSocket) Error: Timed out after {timeout_seconds}s waiting for transcript.")
                 self.final_transcript = "ERROR_DEEPGRAM_TIMEOUT_WS"
-                if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
-                    self._dg_async_completion_event.set()
 
-            if self.interim_transcript: print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='') # Clear last interim line
-            print("Deepgram STT (WebSocket): Finished waiting for transcript_ready_event.")
+            if self.interim_transcript: print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='')
+            print("Deepgram STT (WebSocket): listen_and_transcribe finished waiting for event.")
 
         except sd.PortAudioError as pae:
             self.final_transcript = "ERROR_AUDIO_DEVICE_WS"
             print(f"STT Error (WebSocket): Mic issue: {pae}")
-            if self._dg_async_completion_event and not self._dg_async_completion_event.is_set(): self._dg_async_completion_event.set()
         except Exception as e:
             self.final_transcript = "ERROR_DEEPGRAM_UNEXPECTED_WS"
             print(f"STT Error (WebSocket): General setup/runtime: {e}")
-            if self._dg_async_completion_event and not self._dg_async_completion_event.is_set(): self._dg_async_completion_event.set()
         finally:
             self._audio_stream_active = False
-            # Clear buffer and add sentinel for _audio_buffer.get() in audio sending loop if it were separate.
-            # Since send loop is in this method, just clearing is fine.
             while not self._audio_buffer.empty():
                 try: self._audio_buffer.get_nowait()
                 except queue.Empty: break
-            self._audio_buffer.put(None) # Ensure any get() unblocks if used elsewhere.
+            self._audio_buffer.put(None)
 
             if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
                 print("Deepgram STT (WebSocket): Forcing async completion from listen_and_transcribe finally.")
@@ -255,20 +229,14 @@ class SpeechToTextHandler:
                 print("Deepgram STT (WebSocket): Waiting for Deepgram thread to join...")
                 self._deepgram_thread.join(timeout=5.0)
                 if self._deepgram_thread.is_alive(): print("Deepgram STT (WebSocket) Warning: Thread did not join cleanly.")
-            print(f"Deepgram STT (WebSocket): Exiting listen_and_transcribe. Final transcript: '{self.final_transcript}'")
+            print("Deepgram STT (WebSocket): Exiting listen_and_transcribe.")
 
         if not self.final_transcript.strip() or self.final_transcript.startswith("ERROR_"):
-            # If an error occurred, self.final_transcript already contains the error message.
-            print(f"Deepgram STT (WebSocket): Returning transcript indicating error or empty: '{self.final_transcript}'")
+            print(f"Deepgram STT (WebSocket): No valid transcript. Result: '{self.final_transcript}'")
         return self.final_transcript.strip()
 
 
 # --- TextToSpeechHandler class (Deepgram TTS) ---
-# ... (TextToSpeechHandler remains unchanged) ...
-# ... (if __name__ == '__main__' block remains unchanged) ...
-# Note: The TextToSpeechHandler and if __name__ block are not being modified here as per subtask.
-# Only SpeechToTextHandler is. The full file will be overwritten with these changes
-# integrated into the existing full file content.
 class TextToSpeechHandler:
     def __init__(self, client: DeepgramClient, model: str = "aura-asteria-en",
                  sample_rate: int = 24000, encoding: str = "linear16",
