@@ -62,7 +62,7 @@ def main():
             print(f"Agent: {no_input_message}")
             tts_handler.speak(no_input_message)
             continue
-        
+
         print(f"You said: {user_input}")
 
         if user_input.lower() == 'exit':
@@ -76,26 +76,47 @@ def main():
         result = agent.invoke(state)
         state = result
         
-        agent_response_text = None
-        if result["messages"]:
-            last_message_content = result["messages"][-1]["content"]
-            if "Final Answer:" in last_message_content:
-                final_answer = last_message_content.split("Final Answer:")[-1].strip()
-                agent_response_text = final_answer
-                print(f"\nAgent: {final_answer}\n")
-                
-            elif "Action:" in last_message_content and "Observation:" in last_message_content:
-                print(f"\nAgent (tool observation - not spoken): {last_message_content}\n")
-                continue
-            else:
-                agent_response_text = last_message_content
-                print(f"\nAgent: {last_message_content}\n")
-        else:
-            agent_response_text = "I'm not sure how to respond to that. Could you please rephrase?"
-            print(f"\nAgent: {agent_response_text}\n")
+        # New logic for determining text_to_speak_and_print
+        text_to_speak_and_print = None
+        agent_llm_output_step = result.get("current_step", "")
+        last_message_from_history = result.get("messages", [])[-1] if result.get("messages") else None
 
-        if agent_response_text:
-            tts_handler.speak(agent_response_text)
+        # First, check if the last message in history is a tool call/observation sequence.
+        # This existing logic with `continue` should take precedence if it's a tool step.
+        if last_message_from_history and isinstance(last_message_from_history.get("content"), str):
+            last_content = last_message_from_history.get("content")
+            if "Action:" in last_content and "Action Input:" in last_content and "Observation:" in last_content:
+                print(f"\nAgent (tool observation - not spoken): {last_content}\n")
+                continue # Skip speaking and go to next user input or agent cycle
+
+        # If not a tool observation to be skipped, then determine response:
+        # Priority 1: "Final Answer:" in current_step (direct output from LLM in the agent graph)
+        if isinstance(agent_llm_output_step, str) and "Final Answer:" in agent_llm_output_step:
+            final_answer_text = agent_llm_output_step.split("Final Answer:", 1)[-1].strip()
+            if final_answer_text: # Ensure it's not empty after stripping
+                text_to_speak_and_print = final_answer_text
+
+        # Priority 2: Fallback if no "Final Answer:" in current_step.
+        # Check the last message in history if it's from the assistant and not what we already parsed.
+        if not text_to_speak_and_print and last_message_from_history:
+            if last_message_from_history.get("role") == "assistant":
+                content = last_message_from_history.get("content", "")
+                # Avoid using the raw current_step content again if it was already considered and didn't have "Final Answer:"
+                if content != agent_llm_output_step:
+                    if "Final Answer:" in content: # Agent might put "Final Answer:" in message history too
+                        final_answer_text_from_msg = content.split("Final Answer:", 1)[-1].strip()
+                        if final_answer_text_from_msg:
+                             text_to_speak_and_print = final_answer_text_from_msg
+                    else: # A simple assistant message without the prefix
+                         text_to_speak_and_print = content.strip()
+
+        # Final Fallback: If no specific agent output identified
+        if not text_to_speak_and_print:
+            text_to_speak_and_print = "I'm not sure how to respond to that. Could you please rephrase?"
+
+        # Output the determined response
+        print(f"\nAgent: {text_to_speak_and_print}\n")
+        tts_handler.speak(text_to_speak_and_print)
 
 if __name__ == "__main__":
     main()
