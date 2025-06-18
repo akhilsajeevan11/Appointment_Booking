@@ -1,361 +1,186 @@
 import sounddevice as sd
-from deepgram import (
-    DeepgramClient,
+from deepgram import ( # This is for STT Handler if it were Deepgram, but STT is Whisper now.
+    DeepgramClient,    # So, these might become unused if STT also changes later.
     DeepgramClientOptions
 )
-# Ensure ListenWebSocketOptions and ListenWebSocketResponse are NOT imported from specific submodules
-# if they were causing ImportErrors. Options will be passed as dict.
-import asyncio
+# New imports for gTTS
+from gtts import gTTS
+import playsound
+import tempfile
+
+# Standard imports
+import asyncio # May become unused by TextToSpeechHandler
 import threading
 import os
 import queue
+import numpy as np
+import whisper
 
 # Configuration constants
-SAMPLE_RATE = 16000 # This is for STT (Deepgram)
-SD_CHUNK_SIZE = int(SAMPLE_RATE / 10) # 100ms for sounddevice RawInputStream with STT
+SAMPLE_RATE = 16000 # Whisper prefers 16kHz
+# SD_CHUNK_SIZE = int(SAMPLE_RATE / 10) # May not be needed for Whisper STT
 
-class SpeechToTextHandler:
-    def __init__(self, client: DeepgramClient):
-        self.deepgram_client: DeepgramClient = client
+class SpeechToTextHandler: # Whisper STT (Preserved from previous step)
+    def __init__(self, model_name: str = "small.en", language: str = "en"):
+        print(f"Whisper STT: Initializing with model '{model_name}', language '{language}'.")
+        self.model_name = model_name
+        self.language = language
+        self.model = None
         self.final_transcript: str = ""
         self.interim_transcript: str = ""
-        self._current_utterance_final_transcript: str = ""
 
-        self.transcript_ready_event: threading.Event = threading.Event()
-        self._dg_async_completion_event: asyncio.Event = None
-
-        self.dg_connection = None # Will be an instance from listen.websocket.v("1")
-        self._audio_stream_active: bool = False
-        self._audio_buffer: queue.Queue = queue.Queue()
-        self._deepgram_thread = None # To store the thread object
-
-    def _audio_callback(self, indata, frames, time, status):
-        if status:
-            print(f"Sounddevice status: {status}", flush=True)
-        if self._audio_stream_active:
-            self._audio_buffer.put(bytes(indata))
-
-    async def _on_open(self, dg_connection_instance, open_response, **kwargs): # dg_connection_instance is self.dg_connection
-        print(f"Deepgram STT (WebSocket): Connection Open: {open_response}")
-
-    async def _on_message(self, dg_connection_instance, result, **kwargs): # result is typically a dict
         try:
-            message_type = result.get("type")
-
-            if message_type == "Results":
-                channel = result.get("channel", {}).get("alternatives", [{}])[0]
-                transcript = channel.get("transcript", "")
-                is_final = result.get("is_final", False)
-                speech_final = result.get("speech_final", False)
-
-                if transcript:
-                    if is_final:
-                        self._current_utterance_final_transcript += transcript
-                        # Add space if segment doesn't end with one and is not empty
-                        if transcript and not transcript.isspace() and not self._current_utterance_final_transcript.endswith(" "):
-                             self._current_utterance_final_transcript += " "
-
-                        if speech_final:
-                            self.final_transcript = self._current_utterance_final_transcript.strip()
-                            self._current_utterance_final_transcript = "" # Reset for next utterance
-
-                            if self.interim_transcript: # Clear any lingering interim display
-                                print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='') # Increased padding
-                            print(f"STT Final (Deepgram WebSocket): {self.final_transcript}")
-                            self.interim_transcript = "" # Clear interim
-
-                            if not self.transcript_ready_event.is_set(): self.transcript_ready_event.set()
-                            if self._dg_async_completion_event and not self._dg_async_completion_event.is_set(): self._dg_async_completion_event.set()
-                        else: # is_final but not speech_final
-                            if self.interim_transcript: print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='')
-                            self.interim_transcript = self._current_utterance_final_transcript.strip()
-                            print(f"STT Update (Deepgram WebSocket): {self.interim_transcript}", end='')
-                    else: # Not is_final (interim result)
-                        if self.interim_transcript: print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='')
-                        # For interim, display current segment's interim + what was building up if utterance is long
-                        current_segment_interim = self._current_utterance_final_transcript + transcript
-                        self.interim_transcript = current_segment_interim.strip()
-                        print(f"STT Interim (Deepgram WebSocket): {self.interim_transcript}", end='')
-
-            elif message_type == "Metadata":
-                print(f"Deepgram STT Metadata (WebSocket): {result.get('metadata')}")
-            elif message_type == "SpeechStarted":
-                 print("Deepgram STT (WebSocket): Speech started.")
-            elif message_type == "UtteranceEnd":
-                 print("Deepgram STT (WebSocket): Utterance ended by VAD.")
-
+            print(f"Whisper STT: Loading model '{self.model_name}'...")
+            self.model = whisper.load_model(self.model_name)
+            print(f"Whisper STT: Model '{self.model_name}' loaded successfully.")
         except Exception as e:
-            print(f"Error processing Deepgram STT message (WebSocket): {e} - Result: {result}")
+            print(f"Whisper STT CRITICAL Error: Failed to load model '{self.model_name}'.")
+            print(f"Ensure model name is valid, you have internet for first download, or model is in cache (e.g., ~/.cache/whisper).")
+            print(f"Error details: {e}")
 
-    async def _on_error(self, dg_connection_instance, error, **kwargs):
-        error_message_detail = str(error.get('message') if isinstance(error, dict) else error)
-        self.final_transcript = f"ERROR_DEEPGRAM_STT_WS: {error_message_detail}"
-        print(f"Deepgram STT Error (WebSocket): {error_message_detail}")
-        if not self.transcript_ready_event.is_set(): self.transcript_ready_event.set()
-        if self._dg_async_completion_event and not self._dg_async_completion_event.is_set(): self._dg_async_completion_event.set()
+    def listen_and_transcribe(self) -> str:
+        if not self.model:
+            print("Whisper STT Error: Model not loaded. Cannot transcribe.")
+            return "ERROR_WHISPER_MODEL_NOT_LOADED"
 
-    async def _on_close(self, dg_connection_instance, close_code, close_reason, **kwargs):
-        print(f"Deepgram STT Connection Closed (WebSocket): Code {close_code}, Reason: {close_reason}")
-        if self._current_utterance_final_transcript and not self.final_transcript.startswith("ERROR_") and not self.final_transcript :
-             self.final_transcript = self._current_utterance_final_transcript.strip()
-             print(f"STT Final (Deepgram WebSocket - on close): {self.final_transcript}")
-        elif not self.final_transcript :
-             self.final_transcript = "ERROR_DEEPGRAM_CLOSED_UNEXPECTEDLY_WS"
-        self._current_utterance_final_transcript = ""
-
-        if not self.transcript_ready_event.is_set(): self.transcript_ready_event.set()
-        if self._dg_async_completion_event and not self._dg_async_completion_event.is_set(): self._dg_async_completion_event.set()
-
-    def _run_deepgram_in_thread(self):
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            self._dg_async_completion_event = asyncio.Event()
-
-            options_dict = {
-                "model": "nova-2", "language": "en-US", "smart_format": True,
-                "encoding": "linear16", "sample_rate": SAMPLE_RATE, "channels": 1,
-                "interim_results": True, "utterance_end_ms": "1000",
-                "vad_events": True, "punctuate": True
-            }
-            loop.run_until_complete(self._start_and_run_deepgram(options_dict, self._dg_async_completion_event))
-        except Exception as e:
-            print(f"Critical error in Deepgram STT thread (WebSocket V2): {e}")
-            self.final_transcript = "ERROR_DEEPGRAM_THREAD_CRASH_WS_V2"
-            if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
-                self._dg_async_completion_event.set()
-            if not self.transcript_ready_event.is_set():
-                self.transcript_ready_event.set()
-        finally:
-            print("Deepgram STT (WebSocket V2): _run_deepgram_in_thread finished.")
-
-    async def _start_and_run_deepgram(self, options_dict: dict, completion_event: asyncio.Event):
-        self.dg_connection.on("open", self._on_open)
-        self.dg_connection.on("message", self._on_message)
-        self.dg_connection.on("error", self._on_error)
-        self.dg_connection.on("close", self._on_close)
-
-        print(f"Deepgram STT (WebSocket V2): Attempting to start connection with options: {options_dict}")
-        try:
-            await self.dg_connection.start(**options_dict)
-
-            print("Deepgram STT (WebSocket V2): Connection `start()` method has completed (connection lifecycle finished).")
-            await asyncio.wait_for(completion_event.wait(), timeout=10.0)
-            print("Deepgram STT (WebSocket V2): Completion signal processed.")
-        except asyncio.TimeoutError:
-            print("Deepgram STT (WebSocket V2): Timeout waiting for completion signal after start() should have managed the connection.")
-        except Exception as e:
-            print(f"Deepgram STT Error (WebSocket V2): Exception during start or while running: {e}")
-        finally:
-            print("Deepgram STT (WebSocket V2): _start_and_run_deepgram coroutine finishing. Ensuring connection is closed.")
-            if self.dg_connection:
-                try:
-                    await self.dg_connection.finish()
-                    print("Deepgram STT (WebSocket V2): Connection finished via finally block.")
-                except Exception as e_finish:
-                    print(f"Deepgram STT (WebSocket V2): Error during finish() in finally: {e_finish}")
-
-            if not completion_event.is_set():
-                completion_event.set()
-
-    def listen_and_transcribe(self):
         self.final_transcript = ""
-        self.interim_transcript = ""
-        self._current_utterance_final_transcript = ""
-        self.transcript_ready_event.clear()
-        self._audio_stream_active = True
 
-        while not self._audio_buffer.empty():
-            try: self._audio_buffer.get_nowait()
-            except queue.Empty: break
+        duration = 7
+        channels = 1
+        dtype = 'float32'
 
-        deepgram_thread = None # Renamed from self._deepgram_thread for local scope clarity
         try:
-            self.dg_connection = self.deepgram_client.listen.websocket.v("1")
+            print(f"Whisper STT: Press Enter to start recording for up to {duration} seconds...")
+            input()
+            print("Whisper STT: Recording...")
 
-            deepgram_thread = threading.Thread(target=self._run_deepgram_in_thread)
-            deepgram_thread.daemon = True
-            deepgram_thread.start()
+            myrecording = sd.rec(int(duration * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=channels, dtype=dtype)
+            sd.wait()
+            print("Whisper STT: Recording complete, transcribing...")
 
-            print("Listening (Deepgram WebSocket V2)...")
-            with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=SD_CHUNK_SIZE,
-                                   device=None, dtype='int16', channels=1,
-                                   callback=self._audio_callback) as stream:
+            audio_data = myrecording
+            if audio_data.ndim > 1 and audio_data.shape[1] == 1:
+                audio_data = audio_data.flatten()
+            elif audio_data.ndim > 1 and audio_data.shape[1] > 1:
+                print("Whisper STT Warning: Stereo audio detected, converting to mono by averaging channels.")
+                audio_data = np.mean(audio_data, axis=1)
 
-                while self._audio_stream_active and not self.transcript_ready_event.is_set():
-                    try:
-                        audio_chunk = self._audio_buffer.get(timeout=0.1)
-                        if audio_chunk is None: self._audio_stream_active = False; break
-                        if self.dg_connection:
-                            if self.dg_connection.send(audio_chunk) is False:
-                                print("Deepgram STT (WebSocket V2): send returned false. Stopping audio send.")
-                                self._audio_stream_active = False; break
-                    except queue.Empty: continue
+            result = self.model.transcribe(audio_data, language=self.language if self.language != "auto" else None, fp16=False)
 
-            self._audio_stream_active = False
-            self._audio_buffer.put(None)
+            self.final_transcript = result.get("text", "").strip()
 
-            timeout_seconds = 30
-            if not self.transcript_ready_event.wait(timeout=timeout_seconds):
-                print(f"Deepgram STT (WebSocket V2) Error: Timed out after {timeout_seconds}s waiting for transcript.")
-                self.final_transcript = "ERROR_DEEPGRAM_TIMEOUT_WS_V2"
+            if not self.final_transcript:
+                print("Whisper STT: No speech detected or transcribed.")
+                return ""
 
-            if self.interim_transcript: print(f"\r{' ' * (len(self.interim_transcript) + 40)}\r", end='') # Increased padding
-            print("Deepgram STT (WebSocket V2): listen_and_transcribe finished waiting for event.")
+            print(f"Whisper STT: Transcription: '{self.final_transcript}'")
 
         except sd.PortAudioError as pae:
-            self.final_transcript = "ERROR_AUDIO_DEVICE_WS_V2"
-            print(f"STT Error (WebSocket V2): Mic issue: {pae}")
+            print(f"Whisper STT Error: Microphone/audio device issue: {pae}")
+            return "ERROR_AUDIO_DEVICE"
+        except NameError as ne:
+             print(f"Whisper STT Error: NameError - {ne}. Check imports.")
+             return "ERROR_WHISPER_IMPORT_ISSUE"
         except Exception as e:
-            self.final_transcript = "ERROR_DEEPGRAM_UNEXPECTED_WS_V2"
-            print(f"STT Error (WebSocket V2): General setup/runtime: {e}")
-        finally:
-            self._audio_stream_active = False
-            while not self._audio_buffer.empty():
-                try: self._audio_buffer.get_nowait()
-                except queue.Empty: break
-            self._audio_buffer.put(None)
+            print(f"Whisper STT Error: Transcription failed: {e}")
+            return "ERROR_WHISPER_TRANSCRIPTION_FAILED"
 
-            if self._dg_async_completion_event and not self._dg_async_completion_event.is_set():
-                print("Deepgram STT (WebSocket V2): Forcing async completion from listen_and_transcribe finally.")
-                self._dg_async_completion_event.set()
+        return self.final_transcript
 
-            if deepgram_thread and deepgram_thread.is_alive():
-                print("Deepgram STT (WebSocket V2): Waiting for Deepgram thread to join...")
-                deepgram_thread.join(timeout=5.0)
-                if deepgram_thread.is_alive(): print("Deepgram STT (WebSocket V2) Warning: Thread did not join cleanly.")
-            print("Deepgram STT (WebSocket V2): Exiting listen_and_transcribe.")
+# --- TextToSpeechHandler class (gTTS) ---
+class TextToSpeechHandler:
+    def __init__(self, lang: str = "en"):
+        self.lang = lang
+        # The DeepgramClient is no longer passed to or used by this handler.
+        print(f"gTTS Handler initialized for language: {self.lang}")
 
-        if not self.final_transcript.strip() or self.final_transcript.startswith("ERROR_"):
-            print(f"Deepgram STT (WebSocket V2): No valid transcript. Result: '{self.final_transcript}'")
-        return self.final_transcript.strip()
-
-# --- TextToSpeechHandler class (Deepgram TTS) ---
-class TextToSpeechHandler: # This class is preserved from the input file
-    def __init__(self, client: DeepgramClient, model: str = "aura-asteria-en",
-                 sample_rate: int = 24000, encoding: str = "linear16", container: str = "none"):
-        self.deepgram_client = client
-        self.tts_model = model
-        self.tts_sample_rate = sample_rate
-        self.tts_encoding = encoding
-        self.tts_container = container
-
-        if self.tts_encoding != "linear16" or self.tts_container != "none":
-            print(f"Warning: TextToSpeechHandler is currently optimized for linear16 encoding and 'none' container for direct playback. Current settings: encoding='{self.tts_encoding}', container='{self.tts_container}'")
-
-    async def _speak_async(self, text_to_speak):
+    def speak(self, text_to_speak: str): # text_to_speak should be str
         if not text_to_speak:
-            print("TTS (Deepgram): No text to speak.")
+            print("TTS (gTTS): No text to speak.")
             return
 
-        print(f"TTS Speaking (Deepgram SDK v4.3.1 - speak.rest.stream_memory with params dict V3): {text_to_speak[:60]}{'...' if len(text_to_speak) > 60 else ''}")
+        print(f"TTS Speaking (gTTS): {text_to_speak[:60]}{'...' if len(text_to_speak) > 60 else ''}")
 
-        source_payload = {"text": text_to_speak} # This is the JSON body
-
-        # These options MUST be passed as a dictionary to the 'params' keyword argument
-        tts_query_params = {
-            "model": self.tts_model,
-            "encoding": self.tts_encoding,
-            "sample_rate": self.tts_sample_rate,
-            "container": self.tts_container
-            # e.g., "voice": "aura-helios-en"
-        }
-
+        temp_audio_file = None
         try:
-            # API call with source_payload and params=tts_query_params
-            response = await self.deepgram_client.speak.rest.v("1").stream_memory(
-                source_payload,      # First argument is the source (JSON body)
-                params=tts_query_params  # TTS options as a dictionary passed to 'params' kwarg
-            )
+            tts_obj = gTTS(text=text_to_speak, lang=self.lang, slow=False)
 
-            audio_stream = response.stream
-            if audio_stream:
-                chunk_size = 1024 * 4
-                with sd.RawOutputStream(samplerate=self.tts_sample_rate,
-                                        channels=1,
-                                        dtype='int16',
-                                        device=None) as stream_player:
-                    while True:
-                        chunk = await audio_stream.read(chunk_size)
-                        if not chunk:
-                            break
-                        stream_player.write(chunk)
-            else:
-                print("Deepgram TTS Error: Failed to obtain audio stream from response using stream_memory.")
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as fp:
+                temp_audio_file = fp.name
 
-        except sd.PortAudioError as pae:
-            print(f"TTS Playback Error (PortAudioError with Deepgram TTS): {pae}.")
+            tts_obj.save(temp_audio_file)
+
+            playsound.playsound(temp_audio_file)
+
+        except ImportError:
+            print("gTTS Error: gTTS or playsound library not found. Please ensure they are installed.")
         except Exception as e:
-            print(f"Deepgram TTS Error in _speak_async (using stream_memory with params dict V2): {e}") # V2 in log is from prompt, actual is V3
+            print(f"gTTS Error in speak(): {e}")
+        finally:
+            if temp_audio_file and os.path.exists(temp_audio_file):
+                try:
+                    os.remove(temp_audio_file)
+                except Exception as e_del:
+                    print(f"TTS (gTTS) Error: Failed to delete temporary file {temp_audio_file}: {e_del}")
 
-    def speak(self, text_to_speak):
-        # This synchronous wrapper should remain
-        try:
-            # Ensure asyncio is imported at module level
-            asyncio.run(self._speak_async(text_to_speak))
-        except RuntimeError as re:
-            if "cannot run event loop while another loop is running" in str(re) or                "Nesting asyncio event loops is not supported" in str(re):
-                print(f"TTS Async Error: Could not run speak_async due to existing event loop: {re}. This can happen if speak() is called from an async context.")
-            else:
-                # Re-raise other RuntimeErrors if they are not related to event loop nesting
-                print(f"TTS Runtime Error: {re}")
-                # raise # Optionally re-raise, or just log and continue
-        except Exception as e:
-            print(f"Unexpected error in speak() method: {e}")
-
-if __name__ == '__main__': # This block is preserved from the input file
+if __name__ == '__main__':
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv() # Load .env file for any optional configurations
 
-    print("--- Voice I/O Module Test (Deepgram SDK v4.x Interfaces) ---")
+    print("--- Voice I/O Module Test (Whisper STT & gTTS) ---")
 
-    deepgram_api_key = os.environ.get("DEEPGRAM_API_KEY")
+    # Ensure os is imported if using os.environ.get (it's imported at module level)
 
-    if not deepgram_api_key:
-        print("CRITICAL ERROR: DEEPGRAM_API_KEY environment variable not set. Cannot run STT or TTS tests.")
-    else:
-        print(f"Using DEEPGRAM_API_KEY: ...{deepgram_api_key[-4:] if len(deepgram_api_key) > 4 else '...key_is_short'}")
+    # Test TextToSpeechHandler (gTTS)
+    print("\n--- Testing TextToSpeechHandler (gTTS) ---")
+    try:
+        # Optional: allow language to be set via env var, e.g., TTS_LANG
+        tts_lang = os.environ.get("TTS_LANG", "en")
+        tts_handler = TextToSpeechHandler(lang=tts_lang)
 
-        try:
-            client_config = DeepgramClientOptions(options={"keepalive": "true"})
-            dg_client = DeepgramClient(api_key=deepgram_api_key, config=client_config)
-        except Exception as e:
-            print(f"Failed to initialize DeepgramClient: {e}")
-            dg_client = None
+        print(f"Attempting to speak a short phrase with gTTS (lang={tts_lang})...")
+        tts_handler.speak("Hello, this is a test of Google Text to Speech using the gTTS library.")
 
-        if dg_client:
-            print("\n--- Testing TextToSpeechHandler (Deepgram TTS - speak.rest.stream_memory) ---")
-            try:
-                tts_handler = TextToSpeechHandler(client=dg_client, model="aura-asteria-en", sample_rate=24000)
+        print("Attempting to speak a slightly longer phrase with gTTS...")
+        tts_handler.speak("This audio is generated by gTTS, saved to a temporary MP3 file, and then played.")
 
-                print("Attempting to speak a short phrase with Deepgram TTS (stream_memory)...")
-                tts_handler.speak("Hello, this is a test of Deepgram Text to Speech using the stream memory method.")
+    except Exception as e:
+        print(f"Error during gTTS test: {e}")
+    print("--- Finished gTTS Test ---")
 
-                print("Attempting to speak a slightly longer phrase...")
-                tts_handler.speak("This audio should be streamed directly from Deepgram and played in real-time via sounddevice.")
+    # Test SpeechToTextHandler (Whisper STT)
+    print("\n--- Testing SpeechToTextHandler (Whisper STT) ---")
+    try:
+        # Allow Whisper model name to be set via environment variable, default to "small.en"
+        whisper_model_name = os.environ.get("WHISPER_MODEL_NAME", "small.en")
+        # Optional: allow language to be set, default "en" or "auto" for Whisper
+        whisper_lang = os.environ.get("WHISPER_LANGUAGE", "en")
 
-            except Exception as e:
-                print(f"Error during Deepgram TTS (stream_memory) test: {e}")
-            print("--- Finished Deepgram TTS (stream_memory) Test ---")
+        print(f"Initializing Whisper STT with model: '{whisper_model_name}', language: '{whisper_lang}'")
+        stt_handler = SpeechToTextHandler(model_name=whisper_model_name, language=whisper_lang)
 
-            print("\n--- Testing SpeechToTextHandler (Deepgram STT - listen.websocket) ---")
-            try:
-                stt_handler = SpeechToTextHandler(client=dg_client)
-                for i in range(2):
-                    print(f"\nSTT Attempt {i+1}/2 (WebSocket). Press Enter to start speaking, then speak. (Ctrl+C to skip)")
+        if stt_handler.model is None:
+            print("Whisper STT model failed to load. Skipping STT test. Check error messages above during init.")
+        else:
+            for i in range(2): # Allow a couple of attempts
+                print(f"\nSTT Attempt {i+1}/2 (Whisper). Press Enter to start recording, then speak. (Ctrl+C to skip)")
+                try:
                     input()
-                    print("Recording (Deepgram WebSocket)...")
+                    print("Recording for Whisper STT...")
                     text = stt_handler.listen_and_transcribe()
                     if text and not text.startswith("ERROR_"):
-                        print(f"--- You said (Deepgram WebSocket): {text} ---")
-                    else:
-                        print(f"--- No valid transcription from Deepgram (WebSocket). Result: {text} ---")
-            except KeyboardInterrupt:
-                print("\nSkipped remaining STT tests.")
-            except Exception as e:
-                print(f"Error during Deepgram STT (WebSocket) test setup or execution: {e}")
-            print("--- Finished Deepgram STT (WebSocket) Test ---")
-        else:
-            print("Skipping STT/TTS tests due to DeepgramClient initialization failure.")
+                        print(f"--- You said (Whisper): {text} ---")
+                    elif text.startswith("ERROR_"):
+                        print(f"--- Whisper STT Error: {text} ---")
+                    else: # Empty string result
+                        print(f"--- No speech detected by Whisper or empty transcription. ---")
+                except KeyboardInterrupt:
+                    print("\nSkipped STT attempt by user.")
+                    break # Exit loop on Ctrl+C
+    except Exception as e:
+        print(f"Error during Whisper STT test setup or execution: {e}")
+        # import traceback
+        # traceback.print_exc()
+    print("--- Finished Whisper STT Test ---")
 
     print("\n--- Voice I/O Module Test Complete ---")

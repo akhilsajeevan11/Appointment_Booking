@@ -1,58 +1,58 @@
-import os
+import os # Keep for GOOGLE_API_KEY and potentially Whisper model paths later
 from appointment_system.agent import AppointmentAgent, CS_INITIAL_GREETING
-from appointment_system.voice_io import SpeechToTextHandler, TextToSpeechHandler
-from deepgram import DeepgramClient, DeepgramClientOptions # Added for shared client
+from appointment_system.voice_io import SpeechToTextHandler, TextToSpeechHandler # Imports remain
+# Remove Deepgram specific imports if no longer used by any handler
+# from deepgram import DeepgramClient, DeepgramClientOptions
 
 def main():
     print("Welcome to the Appointment Booking System!")
     print("Say 'exit' to quit.\n")
 
-    # Initialize Deepgram API Key for STT
-    deepgram_api_key = os.environ.get("DEEPGRAM_API_KEY")
-    if not deepgram_api_key:
-        error_message = "Error: DEEPGRAM_API_KEY environment variable not set. This key is required for both Speech-to-Text and Text-to-Speech."
-        print(error_message)
-        # No STT or TTS available to speak this, as both depend on the key.
-        return
-
-    # Remove Piper TTS path retrieval and checks
-    # piper_exe_path = os.environ.get("PIPER_EXE_PATH")
-    # ... (lines for piper paths removed)
-    # if not all([...]):
-    # ... (check for piper paths removed)
-
-    # Create a single DeepgramClient instance
-    client_config = DeepgramClientOptions(options={"keepalive": "true"}) # Or other global options
-    deepgram_client = DeepgramClient(api_key=deepgram_api_key, config=client_config)
+    # GOOGLE_API_KEY for LangChain agent is still loaded by dotenv in agent.py or main.py if load_dotenv is called here
+    # No DEEPGRAM_API_KEY needed for Whisper STT or gTTS.
+    # No DeepgramClient needed.
 
     try:
-        stt_handler = SpeechToTextHandler(client=deepgram_client)
-        # Initialize TextToSpeechHandler with the shared Deepgram client
-        tts_handler = TextToSpeechHandler(client=deepgram_client)
+        # Initialize Whisper STT Handler (defaults to "small.en", lang="en")
+        stt_handler = SpeechToTextHandler()
+
+        # Initialize gTTS Handler (defaults to lang="en")
+        tts_handler = TextToSpeechHandler()
+
+        # Check if Whisper model loaded successfully (stt_handler.model will be None if failed)
+        if stt_handler.model is None:
+            # This error is already printed by SpeechToTextHandler.__init__
+            print("Critical: Whisper STT model failed to load. Exiting.")
+            # tts_handler.speak("Error: The speech recognition model could not be loaded. The application cannot start.") # Optional TTS feedback
+            return
+
     except Exception as e:
-        print(f"Error initializing voice handlers (STT or TTS): {e}")
+        # This will catch errors if the classes themselves can't be instantiated for other reasons
+        # or if sounddevice/audio backend issues occur at a very basic level.
+        print(f"Critical Error: Failed to initialize voice handlers: {e}")
         return
 
-    agent = AppointmentAgent().create_agent() # GOOGLE_API_KEY is used inside AppointmentAgent
+    agent = AppointmentAgent().create_agent() # This needs GOOGLE_API_KEY from .env
     
-    state = { # state initialization remains the same
+    state = {
         "messages": [], "next": "agent", "current_step": "",
         "booking_info": {"name": None, "date": None, "time": None, "purpose": None},
         "last_action": None, "action_count": 0, "conversation_state": CS_INITIAL_GREETING
     }
     
-    initial_greeting = "Welcome to the voice-enabled appointment system, now powered by Deepgram. How can I help you today?"
+    initial_greeting = "Welcome to the voice-enabled appointment system. How can I help you today?"
     print(f"Agent: {initial_greeting}")
-    tts_handler.speak(initial_greeting)
+    tts_handler.speak(initial_greeting) # Test gTTS
 
     while True:
-        user_input = stt_handler.listen_and_transcribe().strip()
+        raw_stt_result = stt_handler.listen_and_transcribe()
+        user_input = raw_stt_result.strip()
 
-        if user_input.startswith("ERROR_"): # Catch all STT errors (Deepgram or audio device)
+        if user_input.startswith("ERROR_WHISPER_") or user_input == "ERROR_AUDIO_DEVICE":
             error_message = f"Speech input error: {user_input}. Please try again."
             print(f"Agent: {error_message}")
             tts_handler.speak(error_message)
-            if user_input == "ERROR_AUDIO_DEVICE": # If critical audio device error, might be best to exit
+            if user_input == "ERROR_AUDIO_DEVICE":
                 print("Exiting due to critical audio device error.")
                 break
             continue

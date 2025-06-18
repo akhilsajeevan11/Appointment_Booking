@@ -73,4 +73,6 @@ xxhash==3.5.0
 yarl==1.20.0
 zstandard==0.23.0
 sounddevice
-deepgram-sdk
+openai-whisper
+gTTS
+playsound==1.2.2
