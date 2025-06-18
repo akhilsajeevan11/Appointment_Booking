@@ -23,6 +23,7 @@ load_dotenv()
 CS_INITIAL_GREETING = "INITIAL_GREETING"
 CS_GENERAL_INQUIRY = "GENERAL_INQUIRY"
 CS_COLLECTING_BOOKING_INFO = "COLLECTING_BOOKING_INFO"
+CS_CONFIRMING_NAME_SPELLING = "CONFIRMING_NAME_SPELLING" # New state
 CS_CONFIRMING_BOOKING_INFO = "CONFIRMING_BOOKING_INFO"
 CS_VIEWING_APPOINTMENTS = "VIEWING_APPOINTMENTS"
 CS_PROVIDING_EXAMPLES = "PROVIDING_EXAMPLES"
@@ -101,31 +102,35 @@ class AppointmentAgent:
                 "Example: If you offered to book 'Dental Checkup' and user said 'hmm, how long does that take?', answer the question, then gently ask if they still want to book it or need other info. "
 
                 "If the user previously indicated they are new or asked for general help, and you haven't yet provided substantial guidance: "
-                "Be proactive. Offer to explain the booking process, or suggest showing examples of appointment purposes (consider GetPurposeExamples tool if they seem broadly unsure). "
-                "Example for a new user: 'Since you're new, I can quickly explain how booking works, or I can show you some example appointment reasons. What would be more helpful for you right now?' "
+                "Be proactive. If the user seems unsure what to do, you can offer to explain the booking process. If they seem unsure about the reason for their appointment after you've engaged them, try to ask a clarifying question like 'What is the main reason for your visit?' before offering generic examples. "
+                "Example for a new user who seems unsure: 'Since you're new, I can quickly explain how booking works. What would you like to do?' "
 
                 "For other general inquiries, or if the user seems to be exploring options after declining a specific offer: "
-                "Listen carefully, politely ask clarifying questions to guide them towards a task you can perform (booking, viewing, examples). "
-                "Avoid immediately re-offering 'GetPurposeExamples' if they just sidestepped a specific booking offer, unless they explicitly ask for alternatives or seem lost. Focus on their last statement. "
+                "Listen carefully, politely ask clarifying questions to guide them towards a task you can perform (booking, viewing). "
+                "If they are trying to book but are unsure about the purpose, first ask them directly, e.g., 'What's the reason for your appointment today?'. Only if they express difficulty in naming a purpose or ask for types of appointments should you then consider using GetPurposeExamples. Focus on their last statement. "
                 "Your aim is to understand their current need and help them navigate to a solution."
             ),
             CS_COLLECTING_BOOKING_INFO: (
                 "You are in the COLLECTING_BOOKING_INFO state. Your goal is to gather all necessary details for an appointment. "
                 "Review {booking_info} to see what's already collected. Also, check {history} for recent user inputs. "
-
+                "When asking for the name: if {booking_info[name]} is not yet collected (is None), ask for it (e.g., 'May I have your name for the booking?'). "
+                "Once the user provides a name and you have stored it in {booking_info[name]} (and it's not None or empty), your immediate next step is to confirm its spelling. "
+                "Your Thought should be: 'I have collected the name as {booking_info[name]}. I must confirm the spelling.' "
+                "Then, set the next conversation_state to CS_CONFIRMING_NAME_SPELLING and formulate a Final Answer to ask for spelling confirmation, for example: 'Thank you. I have your name as {booking_info[name]}. Is that spelled correctly?' "
+                "If the name is already confirmed (e.g., you are returning to this state from CS_CONFIRMING_NAME_SPELLING with a confirmed name AND other info is still missing), then proceed to collect other missing information. "
                 "If {booking_info[purpose]} is already set (e.g., from a previous confirmation or user statement), start by acknowledging it. "
                 "Example if purpose is known: 'Okay, we're setting up your {booking_info[purpose]} appointment. ' "
-                "Then, proceed to ask for the next piece of missing information in a logical order (typically: name, then date YYYY-MM-DD, then time HH:MM). "
-                "If {booking_info[name]} is also known, acknowledge that too: 'For {booking_info[name]} for the {booking_info[purpose]} appointment...' "
-
-                "If a piece of information is provided by the user in their last message, acknowledge it and then ask for the next missing item. "
-                "Example if user just provided name: 'Thanks, {booking_info[name]}. Now, what date would you like for this appointment (in YYYY-MM-DD format)?' "
-                "Example if user just provided date: 'Got it, {booking_info[date]}. And what time (in HH:MM 24-hour format)?' "
-                "Example if user just provided time: 'Perfect, {booking_info[time]}. Lastly, what is the purpose of this appointment?' (Only ask purpose if not already known). "
-
-                "If the user provides information out of order, acknowledge it, ensure it's stored in booking_info, and then ask for the next logical piece. "
-                "Be encouraging and clear. If they say 'yes' or 'correct' to a piece of info you suggested (though less likely in this state unless you are confirming a format), confirm it and move on. "
-                "Your goal is to fill all fields in {booking_info}: name, date, time, and purpose."
+                "Then, proceed to ask for the next piece of missing information in a logical order (typically: date, then time, then purpose if not known). "
+                "If {booking_info[name]} is known and confirmed, acknowledge that too: 'For {booking_info[name]} for the {booking_info[purpose]} appointment...' "
+                "Example if user just provided date (and name is confirmed): 'Got it, {booking_info[date]}. And what time would you like?' "
+                "Example if user just provided time (and name/date confirmed): 'Perfect, {booking_info[time]}. Lastly, what is the purpose of this appointment?' (Only ask purpose if not already known). "
+                "Your goal is to fill all fields in {booking_info}: name (and confirm its spelling), date, time, and purpose."
+            ),
+            CS_CONFIRMING_NAME_SPELLING: (
+                "You are in the CONFIRMING_NAME_SPELLING state. The current name is {booking_info[name]}. You have just asked the user if this spelling is correct. "
+                "Now, evaluate the user's response ({input}). "
+                "If the user confirms (e.g., 'yes', 'that's right', 'correct'): Your Thought should be: 'Name spelling confirmed for {booking_info[name]}. I will proceed to collect the next missing information (date, then time, then purpose if still needed).' Set next conversation_state to CS_COLLECTING_BOOKING_INFO. Formulate a Final Answer like 'Great! Now, what date would you like for the appointment?' (or ask for time/purpose if date is known). "
+                "If the user denies or indicates the spelling is wrong (e.g., 'no', 'that's incorrect', 'it's S-M-I-T-H'): Your Thought should be: 'User says name {booking_info[name]} is incorrect. I need to ask for the correct name again. I will signal to clear the current name. RESET_NAME_FLAG.' Set next conversation_state to CS_COLLECTING_BOOKING_INFO. Formulate a Final Answer like 'My apologies. Could you please provide me with the correct spelling of your name?' "
             ),
             CS_CONFIRMING_BOOKING_INFO: (
                 "You are in the CONFIRMING_BOOKING_INFO state. You should have all details: {booking_info[name]}, {booking_info[date]}, {booking_info[time]}, {booking_info[purpose]}. "
@@ -183,7 +188,9 @@ class AppointmentAgent:
         tool_map = {tool.name: tool for tool in tools}
         
         template = """
-        You are a friendly and helpful appointment booking assistant. You have access to the following tools:
+        You are a friendly and helpful appointment booking assistant. Your goal is to assist users efficiently.
+        **Keep your responses concise, clear, and use natural, everyday language. Avoid being overly formal or verbose unless necessary for clarification.**
+        You have access to the following tools:
         
         {tools}
         
@@ -245,10 +252,7 @@ class AppointmentAgent:
         17. NEVER use the same tool more than 3 times in a row.
         18. If you've used HandleGreeting twice in a row, provide a Final Answer instead.
         19. If you've used any tool 3 times in a row, provide a Final Answer to break the loop.
-        20. When asking for information, be specific about the format required:
-            - For dates: "Please provide the date in YYYY-MM-DD format (e.g., 2025-09-11)"
-            - For time: "Please provide the time in HH:MM 24-hour format (e.g., 09:00 or 14:30)"
-            - For purpose: "Please provide the purpose of your appointment"
+        20. When asking for information, be specific about what you need (e.g., name, date, time, purpose). For purpose, you can say: "Please provide the purpose of your appointment"
         21. If the user provides information in the wrong format, politely ask them to provide it in the correct format.
         22. If the user asks for examples of valid purposes, use the GetPurposeExamples tool.
         23. When you have all required information (has_all_info is true), use the BookAppointment tool to book the appointment.
@@ -406,8 +410,18 @@ class AppointmentAgent:
                 current_conversation_state=current_conversation_state_for_prompt,
                 prompt_segments=self.prompt_segments
             ))
-            logger.info(f"Agent response: {response.content}")
-            state["current_step"] = response.content
+
+            processed_content = response.content
+            if "RESET_NAME_FLAG" in processed_content:
+                logger.info("RESET_NAME_FLAG found in LLM response. Clearing booking_info['name'] for re-collection.")
+                state["booking_info"]["name"] = None
+                # Remove the flag from the content that goes into current_step to keep agent_scratchpad clean
+                processed_content = processed_content.replace("RESET_NAME_FLAG", "").strip()
+
+            logger.info(f"Agent response (raw): {response.content}") # Log raw response
+            logger.info(f"Agent response (processed for current_step): {processed_content}")
+            state["current_step"] = processed_content
+
 
             llm_signaled_next_state = False
             thought_match = re.search(r"Thought:(.*?)Action:|Thought:(.*?)Final Answer:", response.content, re.DOTALL)
