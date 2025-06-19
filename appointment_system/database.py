@@ -23,16 +23,25 @@ class AppointmentDB:
             db_name = os.getenv('MYSQL_DATABASE_NAME', 'Appointments')
             db_port_str = os.getenv('MYSQL_PORT', '3306')
 
-            # Log warnings if defaults are used for critical params
+            # ---- START: ADD DEBUG LOGGING ----
+            logger.info("--- Database Connection Parameters ---")
+            logger.info(f"Attempting to use DB Host: {db_host} (from MYSQL_HOST or default 'localhost')")
+            logger.info(f"Attempting to use DB User: {db_user} (from MYSQL_USER or default 'root')")
+            logger.info(f"Password provided via MYSQL_PASSWORD: {'Yes' if os.getenv('MYSQL_PASSWORD') and os.getenv('MYSQL_PASSWORD') != 'root' else 'No (using default or empty)'}") # Refined password log
+            logger.info(f"Attempting to use DB Name: {db_name} (from MYSQL_DATABASE_NAME or default 'Appointments')")
+            logger.info(f"Attempting to use DB Port String: {db_port_str} (from MYSQL_PORT or default '3306')")
+            # ---- END: ADD DEBUG LOGGING ----
+
+            # Original warnings for defaults can be kept or removed if the above is sufficient
             if db_host == 'localhost':
                 logger.warning("MYSQL_HOST not set, using default 'localhost'.")
             if db_user == 'root':
                 logger.warning("MYSQL_USER not set, using default 'root'.")
-            # Not logging warning for default password for security reasons (avoiding log noise if 'root' is intentional for dev)
             if db_name == 'Appointments':
                 logger.warning("MYSQL_DATABASE_NAME not set, using default 'Appointments'.")
-            if db_port_str == '3306':
-                logger.info("MYSQL_PORT not set, using default '3306'.") # Info, as 3306 is very standard
+            if db_port_str == '3306' and not os.getenv('MYSQL_PORT'): # Only log if truly default
+                logger.info("MYSQL_PORT not set or is '3306', using default '3306'.")
+
 
             try:
                 db_port = int(db_port_str)
@@ -40,18 +49,24 @@ class AppointmentDB:
                 logger.warning(f"Invalid MYSQL_PORT value '{db_port_str}', using default 3306.")
                 db_port = 3306
 
-            logger.info(f"Attempting DB connection with: host='{db_host}', user='{db_user}', database='{db_name}', port={db_port}")
+            logger.info(f"Attempting to use DB Port (numeric): {db_port}")
+
+            # This existing line is a good summary, can be kept.
+            # logger.info(f"Attempting DB connection with: host='{db_host}', user='{db_user}', database='{db_name}', port={db_port}")
 
             self.conn = mysql.connector.connect(
                 host=db_host,
                 database=db_name,
                 user=db_user,
-                password=db_password,
+                password=db_password, # db_password here is the resolved one
                 port=db_port
             )
+            logger.info(f"Successfully connected to MySQL database: {db_name} on {db_host}:{db_port} with user {db_user}.")
             self._setup_database()
         except Error as e:
-            logger.error(f"Error connecting to MySQL: {e}") # Use logger
+            logger.error(f"Error connecting to MySQL: {e}")
+            # Add more detail for connection error
+            logger.error(f"Used connection params for failed attempt: Host='{db_host}', User='{db_user}', DB_Name='{db_name}', Port={db_port}, Password_Provided={'Yes' if db_password and db_password != 'root' else 'No (or default was used)'}")
             raise
         
     def _setup_database(self):

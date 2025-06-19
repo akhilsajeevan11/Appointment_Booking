@@ -111,32 +111,27 @@ class AppointmentAgent:
                 "Your aim is to understand their current need and help them navigate to a solution."
             ),
             CS_COLLECTING_BOOKING_INFO: (
-                "You are in the COLLECTING_BOOKING_INFO state. Your goal is to gather all necessary details for an appointment. "
-                "Review {booking_info} to see what's already collected. Also, check {history} for recent user inputs. "
-                "When asking for the name: if {booking_info[name]} is not yet collected (is None), ask for it (e.g., 'May I have your name for the booking?'). "
-                "Once the user provides a name and you have stored it in {booking_info[name]} (and it's not None or empty), your immediate next step is to confirm its spelling. "
-                "Your Thought should be: 'I have collected the name as {booking_info[name]}. I must confirm the spelling.' "
-                "Then, set the next conversation_state to CS_CONFIRMING_NAME_SPELLING and formulate a Final Answer to ask for spelling confirmation, for example: 'Thank you. I have your name as {booking_info[name]}. Is that spelled correctly?' "
-                "If the name is already confirmed (e.g., you are returning to this state from CS_CONFIRMING_NAME_SPELLING with a confirmed name AND other info is still missing), then proceed to collect other missing information. "
-                "If {booking_info[purpose]} is already set (e.g., from a previous confirmation or user statement), start by acknowledging it. "
-                "Example if purpose is known: 'Okay, we're setting up your {booking_info[purpose]} appointment. ' "
-                "Then, proceed to ask for the next piece of missing information in a logical order (typically: date, then time, then purpose if not known). "
-                "If {booking_info[name]} is known and confirmed, acknowledge that too: 'For {booking_info[name]} for the {booking_info[purpose]} appointment...' "
-                "Example if user just provided date (and name is confirmed): 'Got it, {booking_info[date]}. And what time would you like?' "
-                "Example if user just provided time (and name/date confirmed): 'Perfect, {booking_info[time]}. Lastly, what is the purpose of this appointment?' (Only ask purpose if not already known). "
-                "Your goal is to fill all fields in {booking_info}: name (and confirm its spelling), date, time, and purpose."
+                "You are in the COLLECTING_BOOKING_INFO state. Your goal is to gather all necessary details for an appointment: name, date, time, and purpose. "
+                "Review {booking_info} to see what's already collected. Ask for the details sequentially if they are missing. "
+                "1. If {booking_info[name]} is None, ask for the name (e.g., 'May I have your name for the booking?'). Once the user provides a name and it is stored in {booking_info[name]}, your immediate next step is to confirm its spelling. Your Thought should be: 'I have collected the name as {booking_info[name]}. I must confirm the spelling.' Then, set the next conversation_state to CS_CONFIRMING_NAME_SPELLING and formulate a Final Answer to ask for spelling confirmation, for example: 'Thank you. I have your name as {booking_info[name]}. Is that spelled correctly?' Do not ask for other details yet. "
+                "2. If {booking_info[name]} is filled and confirmed (i.e., you are not coming from CS_CONFIRMING_NAME_SPELLING or it was just confirmed), and {booking_info[date]} is None, ask for the date (e.g., 'What date would you like for this appointment?'). "
+                "3. If name and date are filled (and name is confirmed), and {booking_info[time]} is None, ask for the time (e.g., 'What time would you like?'). "
+                "4. If name, date, and time are filled (and name is confirmed), and {booking_info[purpose]} is None, ask for the purpose (e.g., 'What is the purpose of this appointment?'). "
+                "Acknowledge information as you receive it. "
+                "Once {booking_info[name]} (and it's confirmed), {booking_info[date]}, {booking_info[time]}, and {booking_info[purpose]} are ALL NON-NONE, your Thought should be: 'All required information collected: Name: {booking_info[name]}, Date: {booking_info[date]}, Time: {booking_info[time]}, Purpose: {booking_info[purpose]}. I will now summarize for final confirmation.' Then, set conversation_state to CS_CONFIRMING_BOOKING_INFO and formulate a Final Answer that summarizes these details and asks 'Is this all correct?'"
             ),
             CS_CONFIRMING_NAME_SPELLING: (
                 "You are in the CONFIRMING_NAME_SPELLING state. The current name is {booking_info[name]}. You have just asked the user if this spelling is correct. "
                 "Now, evaluate the user's response ({input}). "
-                "If the user confirms (e.g., 'yes', 'that's right', 'correct'): Your Thought should be: 'Name spelling confirmed for {booking_info[name]}. I will proceed to collect the next missing information (date, then time, then purpose if still needed).' Set next conversation_state to CS_COLLECTING_BOOKING_INFO. Formulate a Final Answer like 'Great! Now, what date would you like for the appointment?' (or ask for time/purpose if date is known). "
+                "If the user confirms (e.g., 'yes', 'that's right', 'correct'): Your Thought should be: 'Name spelling confirmed for {booking_info[name]}. I will now proceed to collect the next missing information (date if {booking_info[date]} is None, then time if {booking_info[time]} is None, then purpose if {booking_info[purpose]} is None). If all other details ({booking_info[date]}, {booking_info[time]}, {booking_info[purpose]}) are already known, then I should transition to CS_CONFIRMING_BOOKING_INFO.' Set next conversation_state to CS_COLLECTING_BOOKING_INFO (or CS_CONFIRMING_BOOKING_INFO if all other info is present). Formulate a Final Answer like 'Great! Now, what date would you like for the appointment?' (or ask for time/purpose, or if all details are now present, summarize everything with 'Great, I have your name as {booking_info[name]}. And I already have date: {booking_info[date]}, time: {booking_info[time]}, purpose: {booking_info[purpose]}. Is this all correct?'). "
                 "If the user denies or indicates the spelling is wrong (e.g., 'no', 'that's incorrect', 'it's S-M-I-T-H'): Your Thought should be: 'User says name {booking_info[name]} is incorrect. I need to ask for the correct name again. I will signal to clear the current name. RESET_NAME_FLAG.' Set next conversation_state to CS_COLLECTING_BOOKING_INFO. Formulate a Final Answer like 'My apologies. Could you please provide me with the correct spelling of your name?' "
             ),
             CS_CONFIRMING_BOOKING_INFO: (
                 "You are in the CONFIRMING_BOOKING_INFO state. You should have all details: {booking_info[name]}, {booking_info[date]}, {booking_info[time]}, {booking_info[purpose]}. "
                 "Clearly list all these details back to the user and ask for their explicit confirmation (e.g., 'yes' or 'correct') before using the BookAppointment tool. "
                 "Example: 'So, I have an appointment for {booking_info[name]} on {booking_info[date]} at {booking_info[time]} for {booking_info[purpose]}. Is that all correct?' "
-                "If they say no or want to change something, identify what needs to change and potentially transition back to COLLECTING_BOOKING_INFO for that piece."
+                "If the user confirms all details (e.g., 'yes', 'correct'), your Thought should be: 'All details confirmed by user. I will now book the appointment.' Then, use the `BookAppointment` tool with the collected {booking_info} (name, date, time, purpose). Your Action and Action Input should be set accordingly. "
+                "If the user denies or wants to change something (e.g., 'no', 'the date is wrong'), your Thought should be: 'User wants to change some details. I will ask them what needs to be corrected and then re-collect that information.' Set next conversation_state to CS_COLLECTING_BOOKING_INFO. Formulate a Final Answer like: 'Okay, which detail would you like to change: the name, date, time, or purpose?'"
             ),
             CS_VIEWING_APPOINTMENTS: (
                 "You are in the VIEWING_APPOINTMENTS state. The user wants to see their appointments. "
@@ -375,20 +370,46 @@ class AppointmentAgent:
                     state["conversation_state"] = CS_GENERAL_INQUIRY
                     logger.info(f"User provided new input ('{last_message}') after conversation was ending. Transitioning from {CS_ENDING_CONVERSATION} to {CS_GENERAL_INQUIRY}.")
 
-            if current_conversation_state_for_prompt in [CS_INITIAL_GREETING, CS_COLLECTING_BOOKING_INFO, CS_GENERAL_INQUIRY, CS_CONFIRMING_BOOKING_INFO] or \
-               (made_booking_offer and user_affirmed):
-                if not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 2:
-                    if state["booking_info"]["name"] is None : state["booking_info"]["name"] = last_message
-                date_match = re.search(r'\d{4}-\d{2}-\d{2}', last_message)
-                if date_match:
-                    if state["booking_info"]["date"] is None : state["booking_info"]["date"] = date_match.group(0)
-                time_match = re.search(r'\d{2}:\d{2}', last_message.lower())
-                if time_match:
-                    if state["booking_info"]["time"] is None : state["booking_info"]["time"] = time_match.group(0)
-                if len(last_message.split()) > 3 and not date_match and not time_match and \
-                   state["booking_info"]["purpose"] is None and not (made_booking_offer and user_affirmed and potential_purpose_from_offer):
-                    if current_conversation_state_for_prompt != CS_CONFIRMING_BOOKING_INFO :
-                         state["booking_info"]["purpose"] = last_message
+            # Conditional auto-filling of booking_info based on user's last message
+            # Only attempt to auto-fill if we are in a state where user is providing them,
+            # or if it's a general inquiry where they might offer info spontaneously.
+            # Avoid auto-filling if we are in CS_CONFIRMING_BOOKING_INFO.
+            # For CS_CONFIRMING_NAME_SPELLING, name extraction is handled by LLM logic.
+            # If name was reset (is None) and we are in CS_COLLECTING_BOOKING_INFO, it's okay to try auto-fill name.
+            if current_conversation_state_for_prompt not in [CS_CONFIRMING_BOOKING_INFO, CS_CONFIRMING_NAME_SPELLING] or \
+               (current_conversation_state_for_prompt == CS_COLLECTING_BOOKING_INFO and state["booking_info"]["name"] is None):
+
+                # Name Extraction (only if name is not set yet)
+                is_potential_name_text = not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 1 # Relaxed to 1 word
+                if state["booking_info"]["name"] is None and is_potential_name_text:
+                     # Avoid interpreting simple "yes" or "no" as a name
+                    if last_message.lower() not in ["yes", "no", "yeah", "nope", "correct", "wrong", "ok", "okay"]:
+                        state["booking_info"]["name"] = last_message
+                        logger.info(f"call_agent: Auto-filled name: '{last_message}' from user input.")
+
+                # Date Extraction (only if date is not set yet)
+                date_match = re.search(r'\b\d{4}-\d{2}-\d{2}\b', last_message) # Added word boundaries
+                if state["booking_info"]["date"] is None and date_match:
+                    state["booking_info"]["date"] = date_match.group(0)
+                    logger.info(f"call_agent: Auto-filled date: '{date_match.group(0)}' from user input.")
+
+                # Time Extraction (only if time is not set yet)
+                time_match = re.search(r'\b\d{2}:\d{2}\b', last_message) # Added word boundaries
+                if state["booking_info"]["time"] is None and time_match:
+                    state["booking_info"]["time"] = time_match.group(0)
+                    logger.info(f"call_agent: Auto-filled time: '{time_match.group(0)}' from user input.")
+
+                # Purpose Extraction (only if purpose is not set yet and message is descriptive)
+                is_potential_purpose = len(last_message.split()) >= 2
+                if state["booking_info"]["purpose"] is None and \
+                   not date_match and not time_match and \
+                   is_potential_name_text and \
+                   is_potential_purpose and \
+                   last_message.lower() not in ["yes", "no", "yeah", "nope", "correct", "wrong", "ok", "okay"]:
+                    # Avoid using it if it was just captured as a name.
+                    if state["booking_info"]["name"] != last_message:
+                        state["booking_info"]["purpose"] = last_message
+                        logger.info(f"call_agent: Auto-filled purpose: '{last_message}' from user input.")
             
             has_all_info = all(state["booking_info"].values())
 
