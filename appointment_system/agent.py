@@ -368,6 +368,43 @@ class AppointmentAgent:
 
             # --- START: More Robust State Transition Logic ---
             thought_content_lower = ""
+            response = self.llm.invoke(prompt.format(
+                input=messages[-1]["content"],
+                history="\n".join([m["content"] for m in messages[:-1]]),
+                agent_scratchpad="",
+                name=state["booking_info"]["name"], date=state["booking_info"]["date"], time=state["booking_info"]["time"], purpose=state["booking_info"]["purpose"], email=state["booking_info"]["email"],
+                last_action=state["last_action"], action_count=state["action_count"], has_all_info=all(val is not None for val in state["booking_info"].values()),
+                current_conversation_state=current_conversation_state_for_prompt,
+                prompt_segments=self.prompt_segments
+            ))
+
+            processed_content = response.content
+            if "RESET_NAME_FLAG" in processed_content:
+                logger.info("RESET_NAME_FLAG found in LLM response. Clearing booking_info['name'] for re-collection.")
+                state["booking_info"]["name"] = None
+                # Remove the flag from the content that goes into current_step to keep agent_scratchpad clean
+                processed_content = processed_content.replace("RESET_NAME_FLAG", "").strip()
+            if "RESET_DATE_FLAG" in processed_content: # Assuming similar flags for other fields might be used
+                logger.info("RESET_DATE_FLAG found in LLM response. Clearing booking_info['date'].")
+                state["booking_info"]["date"] = None
+                processed_content = processed_content.replace("RESET_DATE_FLAG", "").strip()
+            if "RESET_TIME_FLAG" in processed_content:
+                logger.info("RESET_TIME_FLAG found in LLM response. Clearing booking_info['time'].")
+                state["booking_info"]["time"] = None
+                processed_content = processed_content.replace("RESET_TIME_FLAG", "").strip()
+            if "RESET_PURPOSE_FLAG" in processed_content:
+                logger.info("RESET_PURPOSE_FLAG found in LLM response. Clearing booking_info['purpose'].")
+                state["booking_info"]["purpose"] = None
+                processed_content = processed_content.replace("RESET_PURPOSE_FLAG", "").strip()
+            if "RESET_EMAIL_FLAG" in processed_content:
+                logger.info("RESET_EMAIL_FLAG found in LLM response. Clearing booking_info['email'].")
+                state["booking_info"]["email"] = None
+                processed_content = processed_content.replace("RESET_EMAIL_FLAG", "").strip()
+
+            logger.info(f"Agent response (raw): {response.content}") # Log raw response
+            logger.info(f"Agent response (processed for current_step): {processed_content}")
+            state["current_step"] = processed_content
+
             thought_match_for_state = re.search(r"Thought:(.*?)(?:\nAction:|\nFinal Answer:)", response.content, re.DOTALL)
             if thought_match_for_state:
                 thought_content_lower = (thought_match_for_state.group(1) or "").strip().lower()
@@ -376,7 +413,6 @@ class AppointmentAgent:
             llm_signaled_collecting = "transition to collecting booking information" in thought_content_lower or \
                                       "set conversation_state to cs_collecting_booking_info" in thought_content_lower or \
                                       any(cue in response.content for cue in ["Extracted Name:", "Extracted Date:", "Extracted Time:", "Extracted Purpose:", "Extracted Email:"])
-
 
             if state.get("conversation_state") == CS_INITIAL_GREETING:
                 user_input_lower = messages[-1]["content"].lower()
@@ -399,7 +435,6 @@ class AppointmentAgent:
                 elif llm_signaled_collecting: # Also transition if LLM signals it even if not first turn (e.g. user clarifies after greeting)
                     state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
                     logger.info(f"LLM signaled transition from {CS_INITIAL_GREETING} to {CS_COLLECTING_BOOKING_INFO} (not first turn).")
-
 
             # If in CS_COLLECTING_BOOKING_INFO, generally stay there until all info is collected or LLM signals otherwise
             if state.get("conversation_state") == CS_COLLECTING_BOOKING_INFO:
@@ -489,43 +524,6 @@ class AppointmentAgent:
                     logger.info(f"User wants to change booking info. Transitioning from {CS_CONFIRMING_BOOKING_INFO} to {CS_COLLECTING_BOOKING_INFO}.")
 
             logger.info(f"Conversational state for LLM prompt: {current_conversation_state_for_prompt}")
-            response = self.llm.invoke(prompt.format(
-                input=messages[-1]["content"],
-                history="\n".join([m["content"] for m in messages[:-1]]),
-                agent_scratchpad="",
-                name=state["booking_info"]["name"], date=state["booking_info"]["date"], time=state["booking_info"]["time"], purpose=state["booking_info"]["purpose"], email=state["booking_info"]["email"],
-                last_action=state["last_action"], action_count=state["action_count"], has_all_info=has_all_info,
-                current_conversation_state=current_conversation_state_for_prompt,
-                prompt_segments=self.prompt_segments
-            ))
-
-            processed_content = response.content
-            if "RESET_NAME_FLAG" in processed_content:
-                logger.info("RESET_NAME_FLAG found in LLM response. Clearing booking_info['name'] for re-collection.")
-                state["booking_info"]["name"] = None
-                # Remove the flag from the content that goes into current_step to keep agent_scratchpad clean
-                processed_content = processed_content.replace("RESET_NAME_FLAG", "").strip()
-            if "RESET_DATE_FLAG" in processed_content: # Assuming similar flags for other fields might be used
-                logger.info("RESET_DATE_FLAG found in LLM response. Clearing booking_info['date'].")
-                state["booking_info"]["date"] = None
-                processed_content = processed_content.replace("RESET_DATE_FLAG", "").strip()
-            if "RESET_TIME_FLAG" in processed_content:
-                logger.info("RESET_TIME_FLAG found in LLM response. Clearing booking_info['time'].")
-                state["booking_info"]["time"] = None
-                processed_content = processed_content.replace("RESET_TIME_FLAG", "").strip()
-            if "RESET_PURPOSE_FLAG" in processed_content:
-                logger.info("RESET_PURPOSE_FLAG found in LLM response. Clearing booking_info['purpose'].")
-                state["booking_info"]["purpose"] = None
-                processed_content = processed_content.replace("RESET_PURPOSE_FLAG", "").strip()
-            if "RESET_EMAIL_FLAG" in processed_content:
-                logger.info("RESET_EMAIL_FLAG found in LLM response. Clearing booking_info['email'].")
-                state["booking_info"]["email"] = None
-                processed_content = processed_content.replace("RESET_EMAIL_FLAG", "").strip()
-
-            logger.info(f"Agent response (raw): {response.content}") # Log raw response
-            logger.info(f"Agent response (processed for current_step): {processed_content}")
-            state["current_step"] = processed_content
-
 
             llm_signaled_next_state = False
             thought_match = re.search(r"Thought:(.*?)Action:|Thought:(.*?)Final Answer:", response.content, re.DOTALL)

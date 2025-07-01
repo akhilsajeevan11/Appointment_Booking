@@ -207,7 +207,7 @@ def main():
     agent = AppointmentAgent().create_agent()
     state = {
         "messages": [], "next": "agent", "current_step": "",
-        "booking_info": {"name": None, "date": None, "time": None, "purpose": None},
+        "booking_info": {"name": None, "date": None, "time": None, "purpose": None, "email": None},
         "last_action": None, "action_count": 0, "conversation_state": CS_INITIAL_GREETING
     }
 
