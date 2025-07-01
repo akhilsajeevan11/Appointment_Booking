@@ -78,6 +78,7 @@ class AppointmentDB:
                 name VARCHAR(255) NOT NULL,
                 date DATE NOT NULL,
                 time TIME NOT NULL,
+                email VARCHAR(255) NULL,
                 purpose TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -85,7 +86,7 @@ class AppointmentDB:
         self.conn.commit()
         cursor.close()
     
-    def book_appointment(self, name: str, date: str, time: str, purpose: str) -> str:
+    def book_appointment(self, name: str, date: str, time: str, purpose: str, email: str = None) -> str:
         """Book a new appointment."""
         try:
             # Validate date format
@@ -95,13 +96,13 @@ class AppointmentDB:
             
             cursor = self.conn.cursor()
             cursor.execute('''
-                INSERT INTO appointments (name, date, time, purpose)
-                VALUES (%s, %s, %s, %s)
-            ''', (name, date, time, purpose))
+                INSERT INTO appointments (name, date, time, purpose, email)
+                VALUES (%s, %s, %s, %s, %s)
+            ''', (name, date, time, purpose, email))
             self.conn.commit()
             # cursor.close() # Closing in finally
             
-            return f"Successfully booked appointment for {name} on {date} at {time}"
+            return f"Successfully booked appointment for {name} on {date} at {time} (Email: {email if email else 'Not provided'})"
         except ValueError as e:
             logger.error(f"Invalid date or time format for booking: {date}, {time}. Error: {e}")
             return f"Error: Invalid date or time format. Please use YYYY-MM-DD for date and HH:MM for time. Error: {str(e)}"

@@ -37,7 +37,7 @@ class AgentState(TypedDict):
     messages: List[Dict[str, Any]]
     next: str
     current_step: str
-    booking_info: Dict[str, Any]
+    booking_info: Dict[str, Any] # Will include name, date, time, purpose, email
     last_action: str
     action_count: int
     conversation_state: str
@@ -76,7 +76,7 @@ class AppointmentAgent:
             return_messages=True
         )
         self.booking_info = {
-            "name": None, "date": None, "time": None, "purpose": None
+            "name": None, "date": None, "time": None, "purpose": None, "email": None
         }
         self.prompt_segments = {
             CS_INITIAL_GREETING: (
@@ -117,8 +117,9 @@ class AppointmentAgent:
                 "2. If {booking_info[name]} is not None (already confirmed), and {booking_info[date]} is None: Ask for the date (e.g., 'What date would you like for this appointment?'). When the user responds, your Thought must contain `Extracted Date: [YYYY-MM-DD format of date provided by user]`. "
                 "3. If name and date are not None, and {booking_info[time]} is None: Ask for the time (e.g., 'What time would you like?'). When the user responds, your Thought must contain `Extracted Time: [HH:MM format of time provided by user]`. "
                 "4. If name, date, and time are not None, and {booking_info[purpose]} is None: Ask for the purpose (e.g., 'What is the purpose of this appointment?'). When the user responds, your Thought must contain `Extracted Purpose: [purpose provided by user]`. "
+                "5. If name, date, time, and purpose are not None, and {booking_info[email]} is None: Ask for the email (e.g., 'May I have your email address for this booking?'). When the user responds, your Thought must contain `Extracted Email: [user's email address]`. "
                 "Acknowledge information briefly as you receive it if you are asking for the next piece in the same turn. "
-                "Once {booking_info[name]}, {booking_info[date]}, {booking_info[time]}, and {booking_info[purpose]} are ALL FILLED (not None), your Thought must be: 'All required information collected: Name: {booking_info[name]}, Date: {booking_info[date]}, Time: {booking_info[time]}, Purpose: {booking_info[purpose]}. I will now summarize for final confirmation.' Then, set conversation_state to CS_CONFIRMING_BOOKING_INFO. Your Final Answer should summarize these details and asks 'Is this all correct?'"
+                "Once {booking_info[name]}, {booking_info[date]}, {booking_info[time]}, {booking_info[purpose]}, and {booking_info[email]} are ALL FILLED (not None), your Thought must be: 'All required information collected: Name: {booking_info[name]}, Date: {booking_info[date]}, Time: {booking_info[time]}, Purpose: {booking_info[purpose]}, Email: {booking_info[email]}. I will now summarize for final confirmation.' Then, set conversation_state to CS_CONFIRMING_BOOKING_INFO. Your Final Answer should summarize these details and asks 'Is this all correct?'"
             ),
             CS_CONFIRMING_NAME_SPELLING: (
                 "You are in the CONFIRMING_NAME_SPELLING state. The current name recorded is {booking_info[name]}. You have just asked the user if this spelling is correct. "
@@ -127,15 +128,15 @@ class AppointmentAgent:
                 "If the user denies or indicates the spelling is wrong (e.g., 'no', 'that's incorrect'): Your Thought must be: 'User says name {booking_info[name]} is incorrect. I need to ask for the correct name again. RESET_NAME_FLAG'. Set conversation_state to CS_COLLECTING_BOOKING_INFO. Your Final Answer should be: 'My apologies. Could you please provide me with the correct spelling of your name?' "
             ),
             CS_CONFIRMING_BOOKING_INFO: (
-                "You are in the CONFIRMING_BOOKING_INFO state. You have summarized all details: Name: {booking_info[name]}, Date: {booking_info[date]}, Time: {booking_info[time]}, Purpose: {booking_info[purpose]}. You asked 'Is this all correct?'. "
+                "You are in the CONFIRMING_BOOKING_INFO state. You have summarized all details: Name: {booking_info[name]}, Date: {booking_info[date]}, Time: {booking_info[time]}, Purpose: {booking_info[purpose]}, Email: {booking_info[email]}. You asked 'Is this all correct?'. "
                 "Now, evaluate the user's response ({input}). "
                 "If the user confirms (e.g., 'yes', 'correct', 'all good', 'that's right', 'okay', 'ok', 'confirmed'): "
                 "Your Thought should be: 'All details confirmed by user. I will now book the appointment.' "
-                "You MUST output: Action: BookAppointment Action Input: {{\"name\": \"{booking_info[name]}\", \"date\": \"{booking_info[date]}\", \"time\": \"{booking_info[time]}\", \"purpose\": \"{booking_info[purpose]}\"}}. "
+                "You MUST output: Action: BookAppointment Action Input: {{\"name\": \"{booking_info[name]}\", \"date\": \"{booking_info[date]}\", \"time\": \"{booking_info[time]}\", \"purpose\": \"{booking_info[purpose]}\", \"email\": \"{booking_info[email]}\"}}. "
                 "Do NOT output a Final Answer until after the booking action is complete. "
-                "If the user denies or wants to change something (e.g., 'no, the date is wrong', 'actually, can we change the time?'): "
-                "Your Thought must identify the field they want to change (name, date, time, or purpose). Then, include the appropriate reset flag in your thought: `RESET_NAME_FLAG` if they want to change the name, `RESET_DATE_FLAG` for date, `RESET_TIME_FLAG` for time, or `RESET_PURPOSE_FLAG` for purpose. "
-                "Then, set conversation_state to CS_COLLECTING_BOOKING_INFO. Your Final Answer should ask for the corrected information for that specific field. For example, if they said 'the date is wrong', your Final Answer could be 'Okay, what is the correct date for the appointment?'."
+                "If the user denies or wants to change something (e.g., 'no, the date is wrong', 'actually, can we change the time?', 'my email is incorrect'): "
+                "Your Thought must identify the field they want to change (name, date, time, purpose, or email). Then, include the appropriate reset flag in your thought: `RESET_NAME_FLAG` for name, `RESET_DATE_FLAG` for date, `RESET_TIME_FLAG` for time, `RESET_PURPOSE_FLAG` for purpose, or `RESET_EMAIL_FLAG` for email. "
+                "Then, set conversation_state to CS_COLLECTING_BOOKING_INFO. Your Final Answer should ask for the corrected information for that specific field. For example, if they said 'the email is wrong', your Final Answer could be 'Okay, what is the correct email address?'."
             ),
             CS_VIEWING_APPOINTMENTS: (
                 "You are in the VIEWING_APPOINTMENTS state. The user wants to see their appointments. "
@@ -198,6 +199,7 @@ class AppointmentAgent:
         Date: {date}
         Time: {time}
         Purpose: {purpose}
+        Email: {email}
         
         Last action taken: {last_action}
         Number of consecutive actions: {action_count}
@@ -272,7 +274,7 @@ class AppointmentAgent:
             tools=tools,
             input_variables=[
                 "input", "history", "agent_scratchpad",
-                "name", "date", "time", "purpose",
+                "name", "date", "time", "purpose", "email",
                 "last_action", "action_count", "has_all_info",
                 "state_specific_instructions"
             ]
@@ -341,6 +343,8 @@ class AppointmentAgent:
             date_match = re.search(r'Extracted Date: ([0-9]{4}-[0-9]{2}-[0-9]{2})', agent_response)
             time_match = re.search(r'Extracted Time: ([0-9]{2}:[0-9]{2})', agent_response)
             purpose_match = re.search(r'Extracted Purpose: ([^\n]+)', agent_response)
+            email_match = re.search(r'Extracted Email: ([^\s@]+@[^\s@]+\.[^\s@]+)', agent_response) # Basic email regex
+
             if name_match:
                 state["booking_info"]["name"] = name_match.group(1).strip()
                 logger.info(f"Slot-filling: Extracted name: {state['booking_info']['name']}")
@@ -353,9 +357,12 @@ class AppointmentAgent:
             if purpose_match:
                 state["booking_info"]["purpose"] = purpose_match.group(1).strip()
                 logger.info(f"Slot-filling: Extracted purpose: {state['booking_info']['purpose']}")
+            if email_match:
+                state["booking_info"]["email"] = email_match.group(1).strip()
+                logger.info(f"Slot-filling: Extracted email: {state['booking_info']['email']}")
             # --- END SLOT FILLING EXTRACTION ---
 
-            has_all_info = all(state["booking_info"].values())
+            has_all_info = all(val is not None for val in state["booking_info"].values())
 
             # If all info is collected and user confirms, insert to DB directly
             if has_all_info and user_affirmed:
@@ -365,11 +372,12 @@ class AppointmentAgent:
                     state["booking_info"]["name"],
                     state["booking_info"]["date"],
                     state["booking_info"]["time"],
-                    state["booking_info"]["purpose"]
+                    state["booking_info"]["purpose"],
+                    email=state["booking_info"]["email"]
                 )
                 logger.info(f"Direct DB insert result: {result}")
                 # Reset booking_info for next booking
-                state["booking_info"] = {"name": None, "date": None, "time": None, "purpose": None}
+                state["booking_info"] = {"name": None, "date": None, "time": None, "purpose": None, "email": None}
                 # Add a message to the conversation
                 state["messages"].append({"role": "assistant", "content": f"Appointment booked successfully! {result}"})
                 # Optionally, set state to POST_BOOKING_FEEDBACK or similar
@@ -419,7 +427,7 @@ class AppointmentAgent:
                 input=messages[-1]["content"],
                 history="\n".join([m["content"] for m in messages[:-1]]),
                 agent_scratchpad="",
-                name=state["booking_info"]["name"], date=state["booking_info"]["date"], time=state["booking_info"]["time"], purpose=state["booking_info"]["purpose"],
+                name=state["booking_info"]["name"], date=state["booking_info"]["date"], time=state["booking_info"]["time"], purpose=state["booking_info"]["purpose"], email=state["booking_info"]["email"],
                 last_action=state["last_action"], action_count=state["action_count"], has_all_info=has_all_info,
                 current_conversation_state=current_conversation_state_for_prompt,
                 prompt_segments=self.prompt_segments
@@ -431,6 +439,22 @@ class AppointmentAgent:
                 state["booking_info"]["name"] = None
                 # Remove the flag from the content that goes into current_step to keep agent_scratchpad clean
                 processed_content = processed_content.replace("RESET_NAME_FLAG", "").strip()
+            if "RESET_DATE_FLAG" in processed_content: # Assuming similar flags for other fields might be used
+                logger.info("RESET_DATE_FLAG found in LLM response. Clearing booking_info['date'].")
+                state["booking_info"]["date"] = None
+                processed_content = processed_content.replace("RESET_DATE_FLAG", "").strip()
+            if "RESET_TIME_FLAG" in processed_content:
+                logger.info("RESET_TIME_FLAG found in LLM response. Clearing booking_info['time'].")
+                state["booking_info"]["time"] = None
+                processed_content = processed_content.replace("RESET_TIME_FLAG", "").strip()
+            if "RESET_PURPOSE_FLAG" in processed_content:
+                logger.info("RESET_PURPOSE_FLAG found in LLM response. Clearing booking_info['purpose'].")
+                state["booking_info"]["purpose"] = None
+                processed_content = processed_content.replace("RESET_PURPOSE_FLAG", "").strip()
+            if "RESET_EMAIL_FLAG" in processed_content:
+                logger.info("RESET_EMAIL_FLAG found in LLM response. Clearing booking_info['email'].")
+                state["booking_info"]["email"] = None
+                processed_content = processed_content.replace("RESET_EMAIL_FLAG", "").strip()
 
             logger.info(f"Agent response (raw): {response.content}") # Log raw response
             logger.info(f"Agent response (processed for current_step): {processed_content}")
@@ -527,7 +551,7 @@ class AppointmentAgent:
                                     state["conversation_state"] = CS_HANDLING_TOOL_ERROR
                                     logger.info(f"Transitioning state to {CS_HANDLING_TOOL_ERROR} due to BookAppointment operational error: {result}")
                                 elif "successfully booked" in result.lower():
-                                    state["booking_info"] = {"name": None, "date": None, "time": None, "purpose": None}
+                                    state["booking_info"] = {"name": None, "date": None, "time": None, "purpose": None, "email": None}
                                     state["last_action"] = None
                                     state["action_count"] = 0
                                     state["conversation_state"] = CS_POST_BOOKING_FEEDBACK
