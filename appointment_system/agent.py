@@ -129,7 +129,10 @@ class AppointmentAgent:
             CS_CONFIRMING_BOOKING_INFO: (
                 "You are in the CONFIRMING_BOOKING_INFO state. You have summarized all details: Name: {booking_info[name]}, Date: {booking_info[date]}, Time: {booking_info[time]}, Purpose: {booking_info[purpose]}. You asked 'Is this all correct?'. "
                 "Now, evaluate the user's response ({input}). "
-                "If the user confirms (e.g., 'yes', 'correct'): Your Thought should be: 'All details confirmed by user. I will now book the appointment.' Your Action should be `BookAppointment` with all details from {booking_info}. "
+                "If the user confirms (e.g., 'yes', 'correct', 'all good', 'that's right', 'okay', 'ok', 'confirmed'): "
+                "Your Thought should be: 'All details confirmed by user. I will now book the appointment.' "
+                "You MUST output: Action: BookAppointment Action Input: {{\"name\": \"{booking_info[name]}\", \"date\": \"{booking_info[date]}\", \"time\": \"{booking_info[time]}\", \"purpose\": \"{booking_info[purpose]}\"}}. "
+                "Do NOT output a Final Answer until after the booking action is complete. "
                 "If the user denies or wants to change something (e.g., 'no, the date is wrong', 'actually, can we change the time?'): "
                 "Your Thought must identify the field they want to change (name, date, time, or purpose). Then, include the appropriate reset flag in your thought: `RESET_NAME_FLAG` if they want to change the name, `RESET_DATE_FLAG` for date, `RESET_TIME_FLAG` for time, or `RESET_PURPOSE_FLAG` for purpose. "
                 "Then, set conversation_state to CS_COLLECTING_BOOKING_INFO. Your Final Answer should ask for the corrected information for that specific field. For example, if they said 'the date is wrong', your Final Answer could be 'Okay, what is the correct date for the appointment?'."
@@ -330,25 +333,49 @@ class AppointmentAgent:
             user_affirmed = last_message.lower() in affirmative_responses or \
                             any(affirmative in last_message.lower().split() for affirmative in affirmative_responses)
 
-            if made_booking_offer and user_affirmed:
-                logger.info(f"User affirmed a previous booking offer. Last agent msg: '{agents_previous_content}', User input: '{last_message}'")
-                state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
-                current_conversation_state_for_prompt = CS_COLLECTING_BOOKING_INFO
-                if potential_purpose_from_offer and state["booking_info"]["purpose"] is None:
-                    state["booking_info"]["purpose"] = potential_purpose_from_offer
-                    logger.info(f"Pre-filled purpose from offer: '{potential_purpose_from_offer}'")
-            else:
-                if current_conversation_state_for_prompt == CS_INITIAL_GREETING:
-                    user_input_lower = last_message.lower()
-                    if any(phrase in user_input_lower for phrase in ["new here", "am new", "help", "what can you do", "how does this work", "guide me", "get started"]):
-                        state["conversation_state"] = CS_GENERAL_INQUIRY
-                        logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to new user/help query.")
-                    elif len(last_message) > 15 or any(kw in user_input_lower for kw in ["book", "appointment", "view", "schedule", "check"]):
-                        state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
-                        logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} due to specific intent.")
-                    else:
-                        state["conversation_state"] = CS_GENERAL_INQUIRY
-                        logger.info(f"Transitioning from {CS_INITIAL_GREETING} to {state['conversation_state']} for general/short input.")
+            # --- BEGIN SLOT FILLING EXTRACTION ---
+            # Extract booking info from agent response (LLM output)
+            agent_response = messages[-1]["content"]
+            # Use regex to extract cues
+            name_match = re.search(r'Extracted Name: ([^\n]+)', agent_response)
+            date_match = re.search(r'Extracted Date: ([0-9]{4}-[0-9]{2}-[0-9]{2})', agent_response)
+            time_match = re.search(r'Extracted Time: ([0-9]{2}:[0-9]{2})', agent_response)
+            purpose_match = re.search(r'Extracted Purpose: ([^\n]+)', agent_response)
+            if name_match:
+                state["booking_info"]["name"] = name_match.group(1).strip()
+                logger.info(f"Slot-filling: Extracted name: {state['booking_info']['name']}")
+            if date_match:
+                state["booking_info"]["date"] = date_match.group(1).strip()
+                logger.info(f"Slot-filling: Extracted date: {state['booking_info']['date']}")
+            if time_match:
+                state["booking_info"]["time"] = time_match.group(1).strip()
+                logger.info(f"Slot-filling: Extracted time: {state['booking_info']['time']}")
+            if purpose_match:
+                state["booking_info"]["purpose"] = purpose_match.group(1).strip()
+                logger.info(f"Slot-filling: Extracted purpose: {state['booking_info']['purpose']}")
+            # --- END SLOT FILLING EXTRACTION ---
+
+            has_all_info = all(state["booking_info"].values())
+
+            # If all info is collected and user confirms, insert to DB directly
+            if has_all_info and user_affirmed:
+                from .database import AppointmentDB
+                db = AppointmentDB()
+                result = db.book_appointment(
+                    state["booking_info"]["name"],
+                    state["booking_info"]["date"],
+                    state["booking_info"]["time"],
+                    state["booking_info"]["purpose"]
+                )
+                logger.info(f"Direct DB insert result: {result}")
+                # Reset booking_info for next booking
+                state["booking_info"] = {"name": None, "date": None, "time": None, "purpose": None}
+                # Add a message to the conversation
+                state["messages"].append({"role": "assistant", "content": f"Appointment booked successfully! {result}"})
+                # Optionally, set state to POST_BOOKING_FEEDBACK or similar
+                state["conversation_state"] = CS_POST_BOOKING_FEEDBACK
+                # Return early to avoid LLM call
+                return state
 
             if current_conversation_state_for_prompt == CS_AWAITING_RESPONSE_TO_OPTIONS:
                 logger.info(f"In CS_AWAITING_RESPONSE_TO_OPTIONS, processing user choice: '{last_message}'. LLM will determine next specific task state.")
@@ -377,42 +404,7 @@ class AppointmentAgent:
             # Avoid auto-filling if we are in CS_CONFIRMING_BOOKING_INFO.
             # For CS_CONFIRMING_NAME_SPELLING, name extraction is handled by LLM logic.
             # If name was reset (is None) and we are in CS_COLLECTING_BOOKING_INFO, it's okay to try auto-fill name.
-            if current_conversation_state_for_prompt not in [CS_CONFIRMING_BOOKING_INFO, CS_CONFIRMING_NAME_SPELLING] or \
-               (current_conversation_state_for_prompt == CS_COLLECTING_BOOKING_INFO and state["booking_info"]["name"] is None):
-
-                # Name Extraction (only if name is not set yet)
-                is_potential_name_text = not any(char.isdigit() for char in last_message) and len(last_message.split()) >= 1 # Relaxed to 1 word
-                if state["booking_info"]["name"] is None and is_potential_name_text:
-                     # Avoid interpreting simple "yes" or "no" as a name
-                    if last_message.lower() not in ["yes", "no", "yeah", "nope", "correct", "wrong", "ok", "okay"]:
-                        state["booking_info"]["name"] = last_message
-                        logger.info(f"call_agent: Auto-filled name: '{last_message}' from user input.")
-
-                # Date Extraction (only if date is not set yet)
-                date_match = re.search(r'\b\d{4}-\d{2}-\d{2}\b', last_message) # Added word boundaries
-                if state["booking_info"]["date"] is None and date_match:
-                    state["booking_info"]["date"] = date_match.group(0)
-                    logger.info(f"call_agent: Auto-filled date: '{date_match.group(0)}' from user input.")
-
-                # Time Extraction (only if time is not set yet)
-                time_match = re.search(r'\b\d{2}:\d{2}\b', last_message) # Added word boundaries
-                if state["booking_info"]["time"] is None and time_match:
-                    state["booking_info"]["time"] = time_match.group(0)
-                    logger.info(f"call_agent: Auto-filled time: '{time_match.group(0)}' from user input.")
-
-                # Purpose Extraction (only if purpose is not set yet and message is descriptive)
-                is_potential_purpose = len(last_message.split()) >= 2
-                if state["booking_info"]["purpose"] is None and \
-                   not date_match and not time_match and \
-                   is_potential_name_text and \
-                   is_potential_purpose and \
-                   last_message.lower() not in ["yes", "no", "yeah", "nope", "correct", "wrong", "ok", "okay"]:
-                    # Avoid using it if it was just captured as a name.
-                    if state["booking_info"]["name"] != last_message:
-                        state["booking_info"]["purpose"] = last_message
-                        logger.info(f"call_agent: Auto-filled purpose: '{last_message}' from user input.")
-            
-            has_all_info = all(state["booking_info"].values())
+            # Only handle RESET_..._FLAGs below
 
             if current_conversation_state_for_prompt == CS_COLLECTING_BOOKING_INFO and has_all_info:
                 state["conversation_state"] = CS_CONFIRMING_BOOKING_INFO
