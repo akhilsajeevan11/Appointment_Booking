@@ -80,13 +80,15 @@ class AppointmentAgent:
         }
         self.prompt_segments = {
             CS_INITIAL_GREETING: (
-                "You are in the INITIAL_GREETING state. This is the user's first interaction or a fresh start. "
-                "Analyze the user's first message ({history} will be empty or just their message). "
-                "If the user's message is ONLY a simple greeting (e.g., 'hi', 'hello', 'hey'), then using the HandleGreeting tool is appropriate to provide standard options. "
-                "However, if the user says they are new, asks for help, or asks what you can do (e.g., 'i am new here', 'help me', 'what can you do?'), "
-                "DO NOT use HandleGreeting. Instead, formulate a direct, welcoming, and informative response. "
-                "For example: 'Hello! I'm an appointment booking assistant. I can help you schedule new appointments, view existing ones, or show you examples of common appointment purposes. What would you like to do today, or would you like a bit more detail on how I can help?' "
-                "Your goal is to be immediately helpful and engaging based on their initial statement."
+                "You are in the INITIAL_GREETING state. This is the user's first interaction. "
+                "Analyze the user's first message ({input}). "
+                "1. If the user's message is ONLY a simple greeting (e.g., 'hi', 'hello'): Use HandleGreeting tool. "
+                "2. If the user asks for general help or what you can do: Provide a welcoming, informative response (e.g., 'Hello! I can book, view, or show examples for appointments. What would you like to do?'). Do NOT use HandleGreeting. "
+                "3. If the user's first message clearly indicates an intent to book an appointment OR provides any booking details (like name, date, time, or purpose, e.g., 'I want to book an appointment for August 2nd' or 'My name is John, I need an appointment'): "
+                "   Your Thought must be: 'User wants to book and may have provided some info. I will transition to collecting booking information. I will check what info is provided ({input}) and what is in {booking_info}, then ask for the *first* piece of missing information (Name -> Date -> Time -> Purpose -> Email). If they provided a name like 'My name is X', my thought should include `Extracted Name: X`. If they provided a date like 'for August 2nd', my thought should include `Extracted Date: YYYY-08-02` (ensure YYYY-MM-DD). If they provided a purpose like 'for a checkup', my thought should include `Extracted Purpose: checkup`.' "
+                "   Then, set conversation_state to CS_COLLECTING_BOOKING_INFO. "
+                "   Your Final Answer should be to ask for the *first* missing piece of information based on the sequence: Name, Date, Time, Purpose, Email. For example, if they only said 'book appointment', ask for name. If they said 'book for August 2nd', ask for name. If they said 'My name is John, book for August 2nd', ask for time. "
+                "Your goal is to quickly move to `CS_COLLECTING_BOOKING_INFO` if booking is intended."
             ),
             CS_GENERAL_INQUIRY: (
                 "You are in the GENERAL_INQUIRY state. The user's immediate need isn't a specific task, or they haven't clearly affirmed a direct offer you made, or they've just responded to a set of options you provided. "
@@ -111,14 +113,16 @@ class AppointmentAgent:
                 "Your aim is to understand their current need and help them navigate to a solution."
             ),
             CS_COLLECTING_BOOKING_INFO: (
-                "You are in the COLLECTING_BOOKING_INFO state. Your goal is to fill all fields in {booking_info}: name, date, time, and purpose. "
+                "You are in the COLLECTING_BOOKING_INFO state. Your goal is to fill all fields in {booking_info}: name, date, time, purpose, and email. "
                 "ALWAYS check the current {booking_info} to see what is already filled and what is still None. Ask for details sequentially. "
-                "1. If {booking_info[name]} is None: Ask for the name (e.g., 'May I have your name for the booking?'). Once the user provides a response, your Thought should be: 'User provided text for name. Extracted Name: [User's Response]. I will assume this is the name. I must now confirm the spelling.' Then, set conversation_state to CS_CONFIRMING_NAME_SPELLING. Your Final Answer should be to ask for spelling confirmation, for example: 'Thank you. I have your name as [User's Response]. Is that spelled correctly?' (Replace [User's Response] with the actual text they provided for the name). Important: Your *Thought* must contain `Extracted Name: [User's Response]` for the Python system to capture it now. "
-                "2. If {booking_info[name]} is not None (already confirmed), and {booking_info[date]} is None: Ask for the date (e.g., 'What date would you like for this appointment?'). When the user responds, your Thought must contain `Extracted Date: [YYYY-MM-DD format of date provided by user]`. "
-                "3. If name and date are not None, and {booking_info[time]} is None: Ask for the time (e.g., 'What time would you like?'). When the user responds, your Thought must contain `Extracted Time: [HH:MM format of time provided by user]`. "
-                "4. If name, date, and time are not None, and {booking_info[purpose]} is None: Ask for the purpose (e.g., 'What is the purpose of this appointment?'). When the user responds, your Thought must contain `Extracted Purpose: [purpose provided by user]`. "
-                "5. If name, date, time, and purpose are not None, and {booking_info[email]} is None: Ask for the email (e.g., 'May I have your email address for this booking?'). When the user responds, your Thought must contain `Extracted Email: [user's email address]`. "
-                "Acknowledge information briefly as you receive it if you are asking for the next piece in the same turn. "
+                "If the user provides multiple pieces of information in their response (e.g., 'My name is John and I want an appointment for tomorrow for a checkup'), your Thought MUST try to extract all of them using the `Extracted ...: [value]` format for each (e.g., 'Thought: User provided name, date, and purpose. Extracted Name: John. Extracted Date: YYYY-MM-DD (for tomorrow). Extracted Purpose: checkup. I will now ask for the time...'). Then, ask for the NEXT missing piece of information in the sequence. "
+                "Sequence of collection: Name -> Date -> Time -> Purpose -> Email. "
+                "1. If {booking_info[name]} is None: Ask for the name (e.g., 'May I have your name for the booking?'). If the user provides a name, your Thought must include `Extracted Name: [User's Response]`. Then, your Thought should be: 'I will assume this is the name. I must now confirm the spelling.' Set conversation_state to CS_CONFIRMING_NAME_SPELLING. Your Final Answer should be to ask for spelling confirmation: 'Thank you. I have your name as [User's Response]. Is that spelled correctly?' "
+                "2. If {booking_info[name]} is not None (spelling confirmed), and {booking_info[date]} is None: Ask for the date (e.g., 'What date would you like for this appointment?'). If the user provides a date, your Thought must include `Extracted Date: [YYYY-MM-DD format of date]`. "
+                "3. If name and date are not None, and {booking_info[time]} is None: Ask for the time (e.g., 'What time would you like?'). If the user provides a time, your Thought must include `Extracted Time: [HH:MM format of time]`. "
+                "4. If name, date, and time are not None, and {booking_info[purpose]} is None: Ask for the purpose (e.g., 'What is the purpose of this appointment?'). If the user provides a purpose, your Thought must include `Extracted Purpose: [purpose provided]`. "
+                "5. If name, date, time, and purpose are not None, and {booking_info[email]} is None: Ask for the email (e.g., 'May I have your email address for this booking?'). If the user provides an email, your Thought must include `Extracted Email: [user's email address]`. "
+                "Acknowledge information briefly if you are asking for the next piece in the same turn. "
                 "Once {booking_info[name]}, {booking_info[date]}, {booking_info[time]}, {booking_info[purpose]}, and {booking_info[email]} are ALL FILLED (not None), your Thought must be: 'All required information collected: Name: {booking_info[name]}, Date: {booking_info[date]}, Time: {booking_info[time]}, Purpose: {booking_info[purpose]}, Email: {booking_info[email]}. I will now summarize for final confirmation.' Then, set conversation_state to CS_CONFIRMING_BOOKING_INFO. Your Final Answer should summarize these details and asks 'Is this all correct?'"
             ),
             CS_CONFIRMING_NAME_SPELLING: (
@@ -362,10 +366,72 @@ class AppointmentAgent:
                 logger.info(f"Slot-filling: Extracted email: {state['booking_info']['email']}")
             # --- END SLOT FILLING EXTRACTION ---
 
-            has_all_info = all(val is not None for val in state["booking_info"].values())
+            # --- START: More Robust State Transition Logic ---
+            thought_content_lower = ""
+            thought_match_for_state = re.search(r"Thought:(.*?)(?:\nAction:|\nFinal Answer:)", response.content, re.DOTALL)
+            if thought_match_for_state:
+                thought_content_lower = (thought_match_for_state.group(1) or "").strip().lower()
 
-            # If all info is collected and user confirms, insert to DB directly
-            if has_all_info and user_affirmed:
+            # Explicitly check for state transition cues from LLM's thought
+            llm_signaled_collecting = "transition to collecting booking information" in thought_content_lower or \
+                                      "set conversation_state to cs_collecting_booking_info" in thought_content_lower or \
+                                      any(cue in response.content for cue in ["Extracted Name:", "Extracted Date:", "Extracted Time:", "Extracted Purpose:", "Extracted Email:"])
+
+
+            if state.get("conversation_state") == CS_INITIAL_GREETING:
+                user_input_lower = messages[-1]["content"].lower()
+                is_first_turn = len(messages) <= 2 # Approx first user input after initial agent greeting
+
+                booking_keywords = ["book", "appointment", "schedule", "meeting"]
+                simple_greeting_keywords = ["hi", "hello", "hey"]
+
+                contains_booking_intent = any(keyword in user_input_lower for keyword in booking_keywords)
+                is_just_simple_greeting = any(keyword in user_input_lower.split() for keyword in simple_greeting_keywords) and not contains_booking_intent
+
+                if is_first_turn and not is_just_simple_greeting: # If first user message is not just a greeting
+                    if llm_signaled_collecting:
+                        state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
+                        logger.info(f"LLM signaled transition from {CS_INITIAL_GREETING} to {CS_COLLECTING_BOOKING_INFO}.")
+                    elif contains_booking_intent: # Force transition if booking intent detected, even if LLM didn't signal
+                        state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
+                        logger.info(f"Booking intent detected in first user message. Forcefully transitioning from {CS_INITIAL_GREETING} to {CS_COLLECTING_BOOKING_INFO}.")
+                    # If it was a general question, it will stay in INITIAL_GREETING for LLM to handle as per prompt point 2.
+                elif llm_signaled_collecting: # Also transition if LLM signals it even if not first turn (e.g. user clarifies after greeting)
+                    state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
+                    logger.info(f"LLM signaled transition from {CS_INITIAL_GREETING} to {CS_COLLECTING_BOOKING_INFO} (not first turn).")
+
+
+            # If in CS_COLLECTING_BOOKING_INFO, generally stay there until all info is collected or LLM signals otherwise
+            if state.get("conversation_state") == CS_COLLECTING_BOOKING_INFO:
+                # Check if all info is now filled (name, date, time, purpose, email)
+                # Note: The 'email' field was added to self.booking_info.
+                # The has_all_info check needs to be aware of all required fields.
+                required_fields = ["name", "date", "time", "purpose", "email"]
+                has_all_info_now = all(state["booking_info"].get(field) is not None for field in required_fields)
+
+                if has_all_info_now:
+                    # This was the logic for CS_COLLECTING_BOOKING_INFO prompt:
+                    # "Once {booking_info[name]}, {booking_info[date]}, {booking_info[time]}, {booking_info[purpose]}, and {booking_info[email]} are ALL FILLED (not None),
+                    # your Thought must be: 'All required information collected: ... I will now summarize for final confirmation.'
+                    # Then, set conversation_state to CS_CONFIRMING_BOOKING_INFO."
+                    # So, if LLM's thought reflects this, it will set the state.
+                    # We might not need to force it here if LLM follows prompt.
+                    pass # LLM should handle transition to CS_CONFIRMING_BOOKING_INFO as per its prompt
+                else:
+                    # If still collecting, ensure the state remains CS_COLLECTING_BOOKING_INFO
+                    # unless LLM explicitly signals a different state (e.g. user asks to view examples).
+                    # The llm_signaled_next_state logic later will handle explicit signals.
+                    if not state.get("llm_signaled_next_state"): # placeholder for more advanced check
+                         state["conversation_state"] = CS_COLLECTING_BOOKING_INFO
+            # --- END: State Transition Logic ---
+
+            has_all_info = all(val is not None for val in state["booking_info"].values()) # Original check, might need adjustment based on required_fields
+
+            # If all info is collected and user confirms, insert to DB directly (This was specific to CS_CONFIRMING_BOOKING_INFO)
+            # This direct DB insert might be too aggressive here. Let LLM drive via BookAppointment tool.
+            # Consider if this block is still needed or if it should only be triggered from CS_CONFIRMING_BOOKING_INFO state + user affirmation.
+            # For now, let's assume this user_affirmed check is for when the agent has ALREADY presented all info and is in CS_CONFIRMING_BOOKING_INFO.
+            if current_conversation_state_for_prompt == CS_CONFIRMING_BOOKING_INFO and has_all_info and user_affirmed:
                 from .database import AppointmentDB
                 db = AppointmentDB()
                 result = db.book_appointment(
